@@ -1,0 +1,11 @@
+data/
+*.tar.gz
+*.zip
+.git/
+feishu-topics-linux
+config.json
+*.exe
+.DS_Store
+__pycache__/
+FeishuTopics/
+.deployment-backups/

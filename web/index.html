@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>网页呆呆鸟</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" id="themeColor" content="#ffffff">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="网页呆呆鸟">
+<link rel="stylesheet" href="style.css?v=1.9.11">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img class="logo-img" src="/favicon.svg" alt="" width="24" height="24"> 网页呆呆鸟</div>
+  <span id="modeBadge" class="badge" hidden>模拟模式</span>
+  <div class="spacer"></div>
+  <button id="btnNotify" class="btn icon" title="任务完成通知设置">🔔</button>
+  <button id="btnGroups" class="btn" title="选择要包含的群聊" hidden><span id="groupLabel">选择群聊</span> <span id="groupCount" class="count"></span></button>
+  <button id="btnRefresh" class="btn icon" title="对话会自动更新；点此立即重新拉取" hidden>↻</button>
+  <button id="btnMarkAllRead" class="btn icon" title="全部标记为已读" hidden>✓</button>
+  <a id="btnLogin" class="btn primary" href="/api/auth/login" hidden>用飞书登录</a>
+  <div id="userBox" class="userbox" hidden><span id="userAvatar"></span><span id="userName" class="uname"></span><button id="btnLogout" class="btn" title="退出登录（清除本地 token）">退出</button></div>
+  <button id="btnInstall" class="btn" title="把本页安装为独立的应用窗口（Chrome）" hidden>安装应用</button>
+  <button id="btnTheme" class="btn icon" title="切换明/暗主题">◐</button>
+</header>
+
+<main id="layout">
+  <aside id="colList" class="col">
+    <div class="col-tabs-bar">
+      <div id="topicTabs" class="tabs" role="tablist">
+        <button id="tabMyTopics" class="tab on" role="tab" aria-selected="true">我的会话 <span id="myCount" class="count"></span></button>
+        <button id="tabGroupTopics" class="tab" role="tab" aria-selected="false">群会话 <span id="groupCountTab" class="count"></span></button>
+      </div>
+    </div>
+    <div class="col-head">
+      <input id="search" type="search" placeholder="搜索话题、发送人、群名…" autocomplete="off">
+      <button id="btnNewTopic" class="btn primary nt-btn" title="在所选群聊中发起新话题" hidden>＋ 新话题</button>
+    </div>
+    <div id="banner"></div>
+    <div id="topicList" class="scroll"></div>
+  </aside>
+  <div class="splitter" data-var="--left-w" data-dir="1"></div>
+
+  <section id="colChat" class="col">
+    <div id="chatHead" class="col-head chat-head" hidden>
+      <div class="chat-title" id="chatTitle"></div>
+      <div class="chat-sub" id="chatSub"></div>
+    </div>
+    <div id="chatWarn"></div>
+    <div id="messages" class="scroll">
+      <div class="empty"><div class="empty-ico">💬</div><div>从左侧选择一个话题查看对话</div></div>
+    </div>
+    <form id="composer" class="composer" hidden autocomplete="off">
+      <div id="composerNotice"></div>
+      <div id="replyErr"></div>
+      <div id="mentionPop" class="mention-pop" hidden></div>
+      <div id="replyTray" class="tray"></div>
+      <div class="composer-row">
+        <button id="btnMention" type="button" class="btn icon" title="@ 话题中的成员">@</button>
+        <button id="btnAttach" type="button" class="btn icon" title="添加图片/文件（也可粘贴或拖拽到此处）">📎</button>
+        <input id="replyFile" type="file" multiple hidden>
+        <textarea id="replyInput" rows="1" maxlength="10000" placeholder="回复话题…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button id="btnSend" type="submit" class="btn primary">发送</button>
+      </div>
+      <div class="composer-foot">
+        <div class="composer-hint" id="replyHint">以你本人的身份回复到该话题 · 可粘贴/拖拽图片与文件</div>
+      </div>
+    </form>
+  </section>
+  <div class="splitter" data-var="--right-w" data-dir="-1"></div>
+
+  <aside id="colFiles" class="col">
+    <div id="filesHead" class="col-head">
+      <div id="filesTabs" class="tabs" role="tablist">
+        <button id="tabFiles" class="tab on" role="tab" aria-selected="true">飞书在线文档 <span id="filesCount" class="count"></span></button>
+        <button id="tabDl" class="tab" role="tab" aria-selected="false">文件 <span id="dlCount" class="count"></span></button>
+      </div>
+      <span id="filesTitle" hidden>预览</span>
+    </div>
+    <div id="filesBody" class="scroll"><div class="empty small">选择话题后在此显示附件</div></div>
+  </aside>
+</main>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <h2 id="modalTitle">选择群聊</h2>
+      <button id="modalClose" class="btn icon" title="关闭">✕</button>
+    </div>
+    <p class="hint">勾选要在左侧显示话题的群聊（机器人需已在群内）。选择会保存在本地 <code>selection.json</code>。</p>
+    <input id="groupSearch" type="search" placeholder="搜索群名…" autocomplete="off">
+    <div id="groupList" class="group-list"></div>
+    <div class="modal-foot">
+      <button id="groupAll" class="btn">全选</button>
+      <button id="groupNone" class="btn">清空</button>
+      <div class="spacer"></div>
+      <button id="groupSave" class="btn primary">保存并加载</button>
+    </div>
+  </div>
+</div>
+<div id="ntModal" class="modal" hidden>
+  <form id="ntForm" class="modal-card nt-card" role="dialog" aria-modal="true" aria-labelledby="ntTitle" autocomplete="off">
+    <div class="modal-head">
+      <h2 id="ntTitle">发起新话题</h2>
+      <button id="ntClose" type="button" class="btn icon" title="关闭">✕</button>
+    </div>
+    <div class="nt-row"><label for="ntChat">发到群聊</label><select id="ntChat"></select></div>
+    <div class="nt-row nt-modes">
+      <label class="radio"><input type="radio" name="ntMode" value="root" checked> 发送一条新消息作为话题</label>
+      <label class="radio"><input type="radio" name="ntMode" value="reply"> 在群里已有的消息下开启话题</label>
+    </div>
+    <div id="ntRecent" class="nt-recent" hidden></div>
+    <p class="hint" id="ntExplain">飞书没有「创建话题」接口：这里以你的身份向群里发送一条消息，它会出现在左侧列表中；第一次有人（包括你）以话题形式回复它之后，飞书才会真正创建话题。</p>
+    <div id="ntErr"></div>
+    <div id="ntMentionPop" class="mention-pop nt-pop" hidden></div>
+    <div id="ntTray" class="tray"></div>
+    <div class="composer-row">
+      <button id="ntMention" type="button" class="btn icon" title="@ 成员">@</button>
+      <button id="ntAttach" type="button" class="btn icon" title="添加图片/文件（也可粘贴或拖拽）">📎</button>
+      <input id="ntFile" type="file" multiple hidden>
+      <textarea id="ntInput" rows="4" maxlength="10000" placeholder="输入话题内容…（Ctrl/⌘+Enter 发送）"></textarea>
+    </div>
+    <div class="modal-foot">
+      <span class="composer-hint" id="ntHint"></span>
+      <div class="spacer"></div>
+      <button id="ntCancel" type="button" class="btn">取消</button>
+      <button id="ntSend" type="submit" class="btn primary">发送</button>
+    </div>
+  </form>
+</div>
+<div id="notifyModal" class="modal" hidden>
+  <div class="modal-card notify-card" role="dialog" aria-modal="true" aria-labelledby="notifyTitle">
+    <div class="modal-head">
+      <h2 id="notifyTitle">🔔 任务完成通知设置</h2>
+      <button id="notifyClose" type="button" class="btn icon" title="关闭">✕</button>
+    </div>
+    <p class="hint">当呆呆鸟执行完耗时较长的思考或生成任务后，通过多渠道及时通知你，无需一直盯屏等待。</p>
+
+    <div class="notify-section">
+      <div class="notify-row">
+        <label class="notify-toggle">
+          <input type="checkbox" id="chkNotifyFeishu" checked>
+          <span class="notify-title">📱 飞书单聊消息强提醒（推荐）</span>
+        </label>
+        <button id="btnTestFeishu" type="button" class="btn sm">发送测试卡片</button>
+      </div>
+      <p class="notify-desc">任务完成时，飞书应用机器人会向你的飞书账号直接发送 1 对 1 卡片通知。<b>手机和电脑飞书均会响铃、弹窗、显示红点角标</b>，点击卡片按钮可直接跳转回本话题。</p>
+    </div>
+
+    <div class="notify-section">
+      <div class="notify-row">
+        <label class="notify-toggle">
+          <input type="checkbox" id="chkNotifyBrowser" checked>
+          <span class="notify-title">💻 电脑桌面系统通知</span>
+        </label>
+        <button id="btnTestBrowser" type="button" class="btn sm">授权 / 测试通知</button>
+      </div>
+      <p class="notify-desc">在电脑屏幕角落弹出系统横幅通知（通过浏览器原生 Notification API）。网页在后台或最小化时也能收到。<span id="browserPermStatus" class="perm-status"></span></p>
+    </div>
+
+    <div class="notify-section">
+      <div class="notify-row">
+        <label class="notify-toggle">
+          <input type="checkbox" id="chkNotifySound" checked>
+          <span class="notify-title">🔊 任务完成提示音</span>
+        </label>
+        <button id="btnTestSound" type="button" class="btn sm">试听音效</button>
+      </div>
+      <p class="notify-desc">任务完成时自动播放清脆的完成提示音（叮咚声）。</p>
+    </div>
+
+    <div class="modal-foot">
+      <span id="notifyStatus" class="composer-hint"></span>
+      <div class="spacer"></div>
+      <button id="btnNotifyDone" type="button" class="btn primary">保存并关闭</button>
+    </div>
+  </div>
+</div>
+<div id="encryptModal" class="modal" hidden>
+  <div class="modal-card encrypt-card" role="dialog" aria-modal="true">
+    <div class="encrypt-title">📎 附件权限</div>
+    <div class="encrypt-desc">本次消息包含附件，请选择权限模式：</div>
+    <div class="encrypt-opts">
+      <button id="encryptYes" type="button" class="encrypt-btn selected">
+        <span class="encrypt-ico">🔒</span>
+        <span class="encrypt-label">加密发送</span>
+        <span class="encrypt-sub">仅你和呆呆鸟可阅读</span>
+      </button>
+      <button id="encryptNo" type="button" class="encrypt-btn">
+        <span class="encrypt-ico">👥</span>
+        <span class="encrypt-label">群可阅读</span>
+        <span class="encrypt-sub">当前群成员均可查看附件</span>
+      </button>
+    </div>
+    <div class="encrypt-foot">
+      <button id="encryptCancel" type="button" class="btn">取消</button>
+      <button id="encryptConfirm" type="button" class="btn primary">确认发送</button>
+    </div>
+  </div>
+</div>
+<script src="app.js?v=1.9.11"></script>
+<script src="pwa.js"></script>
+</body>
+</html>

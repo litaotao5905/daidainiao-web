@@ -1,0 +1,29 @@
+# Configuration & Secrets
+config.json
+*.env
+*.secret
+
+# Runtime data & user cache
+data/
+FeishuTopics/
+.deployment-backups/
+downloads/
+*.log
+
+# Compiled binaries & archives
+feishu-topics
+feishu-topics-linux
+feishu-topics-mac*
+*.exe
+网页呆呆鸟.exe
+网页呆呆鸟
+dist/
+build/
+*.zip
+*.tar.gz
+
+# OS & Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

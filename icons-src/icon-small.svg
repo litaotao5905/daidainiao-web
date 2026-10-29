@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="飞书话题">
+  <defs>
+    <linearGradient id="bg" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f6fff"/>
+      <stop offset="0.55" stop-color="#1590d2"/>
+      <stop offset="1" stop-color="#0fb99c"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+  <rect x="56" y="70" width="318" height="196" rx="62" fill="#fff"/>
+  <rect x="146" y="282" width="318" height="168" rx="62" fill="#d4f6ee"/>
+  <rect x="106" y="138" width="214" height="44" rx="22" fill="#2a6ff0"/>
+  <rect x="196" y="338" width="214" height="44" rx="22" fill="#0c9f86"/>
+  <path d="M98 262l-6 60 56-48z" fill="#fff"/>
+</svg>
