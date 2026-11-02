@@ -246,7 +246,7 @@ func (m *MockAPI) ListMessages(ctx context.Context, containerType, containerID, 
 	}
 	sort.SliceStable(src, func(i, j int) bool {
 		a, b := msgTime(src[i]), msgTime(src[j])
-		if desc && containerType == "chat" {
+		if desc {
 			return a > b
 		}
 		return a < b

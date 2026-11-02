@@ -638,7 +638,10 @@ func TestReplyQueueWhenDaidainiaoRunning(t *testing.T) {
 		}
 	}
 	// Avoid the 1.5s transition sleep in unit test by marking wasBusy=false
-	svc.initQueue().wasBusy["omt_mock_101"] = false
+	q := svc.initQueue()
+	q.mu.Lock()
+	q.wasBusy["omt_mock_101"] = false
+	q.mu.Unlock()
 	ma.mu.Unlock()
 
 	// Trigger queue check -> should dispatch qid automatically!

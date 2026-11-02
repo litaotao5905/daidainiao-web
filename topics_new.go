@@ -219,15 +219,18 @@ func (s *Service) ReplyFull(ctx context.Context, threadID string, req ReplyReque
 		raws = items
 		tgt.rootID, tgt.chatID, tgt.threadID = pendingMID, items[0].ChatID, items[0].ThreadID
 		if tgt.threadID != "" {
-			if traws, err := s.threadMessages(ctx, tgt.threadID, &items[0], true); err == nil && len(traws) > 0 {
+			if traws, err := s.threadMessages(ctx, tgt.threadID, &items[0], false); err == nil && len(traws) > 0 {
 				raws = traws
 			}
 		}
-		tgt.topicFolder = s.topicDriveFolder(raws, req.Text, pendingMID)
+		if len(req.Attachments) > 0 {
+			tgt.topicFolder = s.topicDriveFolder(raws, req.Text, pendingMID)
+		}
 	} else {
 		var err error
-		raws, err = s.threadMessages(ctx, threadID, s.knownRoot(threadID), true)
-		if err != nil {
+		// 优先从本地历史缓存获取元数据与状态，避免发送时阻塞同步重拉历史消息导致超时
+		raws, err = s.threadMessages(ctx, threadID, s.knownRoot(threadID), false)
+		if err != nil || len(raws) == 0 {
 			raws, err = s.threadMessages(ctx, threadID, nil, false)
 			if err != nil {
 				return nil, err
@@ -245,7 +248,9 @@ func (s *Service) ReplyFull(ctx context.Context, threadID string, req ReplyReque
 		if key == "" {
 			key = threadID
 		}
-		tgt.topicFolder = s.topicDriveFolder(raws, req.Text, key)
+		if len(req.Attachments) > 0 {
+			tgt.topicFolder = s.topicDriveFolder(raws, req.Text, key)
+		}
 	}
 	tgt.shareWithChat = shareChatRequested(req.Encrypt, len(req.Attachments))
 

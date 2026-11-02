@@ -750,6 +750,7 @@ func (s *Service) compose(ctx context.Context, tgt composeTarget, text string, m
 			threadID = m.ThreadID
 		}
 	}
+	s.appendSentToCache(firstNonEmpty(threadID, tgt.threadID), sent)
 	s.invalidateChat(tgt.chatID, threadID, tgt.threadID)
 	r := s.render(ctx, sent)
 	res.Messages = r.msgs
@@ -791,12 +792,9 @@ func (s *Service) fillSent(resp *RawMessage, om outMsg) {
 }
 
 // invalidateChat drops the cached views a new message makes stale.
+// Note: Historical thread messages are immutable and appended locally, so
+// thread message caches are preserved rather than deleted.
 func (s *Service) invalidateChat(chatID string, threadIDs ...string) {
-	for _, t := range threadIDs {
-		if t != "" {
-			s.cache.Delete(s.k("thread:" + t))
-		}
-	}
 	if chatID != "" {
 		s.cache.Delete(s.k("threadrefs:" + chatID))
 	}

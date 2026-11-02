@@ -312,6 +312,68 @@ func (s *Service) threadMessages(ctx context.Context, threadID string, root *Raw
 	if age, ok = s.cache.Get(key, &cached); ok && !refresh && age < ttlThread && !hasCardPlaceholder(cached) {
 		return s.attachRoot(key, cached, root), nil
 	}
+
+	// 1. 本地已有历史缓存：历史已完成消息不变，每次只增量拉取最新 1 批次（50条，按最新降序）并合并
+	if ok && len(cached) > 0 {
+		var newBatch []RawMessage
+		token := ""
+		seenPages := map[string]bool{}
+		overlapFound := false
+
+		cachedMap := make(map[string]bool, len(cached))
+		for _, m := range cached {
+			if m.MessageID != "" {
+				cachedMap[m.MessageID] = true
+			}
+		}
+
+		for {
+			if seenPages[token] {
+				break
+			}
+			seenPages[token] = true
+			p, err := s.api.ListMessages(ctx, "thread", threadID, token, true)
+			if err != nil {
+				if isTransientErr(ctx, err) || !refresh {
+					return s.attachRoot(key, cached, root), nil
+				}
+				return nil, err
+			}
+			for _, item := range p.Items {
+				newBatch = append(newBatch, item)
+				if cachedMap[item.MessageID] {
+					overlapFound = true
+				}
+			}
+			// 只要最新批次中包含了本地已有消息，说明已与本地历史完全衔接，无需再翻更早历史
+			if overlapFound || !p.HasMore || p.PageToken == "" {
+				break
+			}
+			token = p.PageToken
+		}
+
+		// 合并本地历史与增量新批次（新批次更新状态如卡片交互，已完成的历史消息保持不变）
+		mergedMap := make(map[string]RawMessage, len(cached)+len(newBatch))
+		for _, m := range cached {
+			if m.MessageID != "" {
+				mergedMap[m.MessageID] = m
+			}
+		}
+		for _, m := range newBatch {
+			if m.MessageID != "" {
+				mergedMap[m.MessageID] = m
+			}
+		}
+		merged := make([]RawMessage, 0, len(mergedMap))
+		for _, m := range mergedMap {
+			merged = append(merged, m)
+		}
+		out := mergeRoot(merged, root)
+		s.cache.Set(key, out)
+		return out, nil
+	}
+
+	// 2. 本地无缓存（首次拉取）：全量拉取初始化本地持久化缓存
 	var all []RawMessage
 	token := ""
 	seenPages := map[string]bool{}
@@ -341,6 +403,37 @@ func (s *Service) threadMessages(ctx context.Context, threadID string, root *Raw
 	out := mergeRoot(all, root)
 	s.cache.Set(key, out)
 	return out, nil
+}
+
+// appendSentToCache adds newly sent messages directly to the local cached thread,
+// preserving all immutable historical messages without requiring a full re-fetch.
+func (s *Service) appendSentToCache(threadID string, sent []RawMessage) {
+	if threadID == "" || len(sent) == 0 {
+		return
+	}
+	key := s.k("thread:" + threadID)
+	var cached []RawMessage
+	_, ok := s.cache.Get(key, &cached)
+	if !ok || len(cached) == 0 {
+		return
+	}
+	mergedMap := make(map[string]RawMessage, len(cached)+len(sent))
+	for _, m := range cached {
+		if m.MessageID != "" {
+			mergedMap[m.MessageID] = m
+		}
+	}
+	for _, m := range sent {
+		if m.MessageID != "" {
+			mergedMap[m.MessageID] = m
+		}
+	}
+	merged := make([]RawMessage, 0, len(mergedMap))
+	for _, m := range mergedMap {
+		merged = append(merged, m)
+	}
+	out := mergeRoot(merged, s.knownRoot(threadID))
+	s.cache.Set(key, out)
 }
 
 // isTransientErr returns true when a request timed out or was cancelled while

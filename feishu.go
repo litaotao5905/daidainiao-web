@@ -490,12 +490,10 @@ func (c *FeishuClient) ListMessages(ctx context.Context, containerType, containe
 	q.Set("container_id_type", containerType)
 	q.Set("container_id", containerID)
 	q.Set("page_size", "50")
-	if containerType == "chat" {
-		if desc {
-			q.Set("sort_type", "ByCreateTimeDesc")
-		} else {
-			q.Set("sort_type", "ByCreateTimeAsc")
-		}
+	if desc {
+		q.Set("sort_type", "ByCreateTimeDesc")
+	} else {
+		q.Set("sort_type", "ByCreateTimeAsc")
 	}
 	if pageToken != "" {
 		q.Set("page_token", pageToken)
