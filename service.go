@@ -248,7 +248,11 @@ func (s *Service) threadRefs(ctx context.Context, chatID string, refresh bool) (
 	refs := []threadRef{}
 	seen := map[string]int{}
 	token := ""
-	for page := 0; page < s.cfg.HistoryPages && len(refs) < s.cfg.MaxTopicsPerChat; page++ {
+	limit := s.cfg.MaxTopicsPerChat
+	if limit < 100 {
+		limit = 100
+	}
+	for page := 0; page < s.cfg.HistoryPages && len(refs) < limit; page++ {
 		p, err := s.api.ListMessages(ctx, "chat", chatID, token, true)
 		if err != nil {
 			if ok {
@@ -262,7 +266,7 @@ func (s *Service) threadRefs(ctx context.Context, chatID string, refresh bool) (
 			}
 			idx, dup := seen[m.ThreadID]
 			if !dup {
-				if len(refs) >= s.cfg.MaxTopicsPerChat {
+				if len(refs) >= limit {
 					continue
 				}
 				seen[m.ThreadID] = len(refs)
@@ -282,6 +286,24 @@ func (s *Service) threadRefs(ctx context.Context, chatID string, refresh bool) (
 		}
 		token = p.PageToken
 	}
+
+	// 合并历史缓存中的已知话题（保底不丢失任何前序拉取过或回复过的话题）
+	if ok && len(cached) > 0 {
+		for _, oldRef := range cached {
+			if oldRef.ThreadID == "" {
+				continue
+			}
+			if idx, dup := seen[oldRef.ThreadID]; !dup {
+				if len(refs) < limit*2 {
+					seen[oldRef.ThreadID] = len(refs)
+					refs = append(refs, oldRef)
+				}
+			} else if refs[idx].Root == nil && oldRef.Root != nil {
+				refs[idx].Root = oldRef.Root
+			}
+		}
+	}
+
 	s.cache.Set(key, refs)
 	return refs, nil
 }

@@ -98,8 +98,8 @@ func defaultConfig() Config {
 		Addr:             "127.0.0.1:8080",
 		DataDir:          "data",
 		DriveShareMode:   DriveShareBotOnly,
-		MaxTopicsPerChat: 30,
-		HistoryPages:     6,
+		MaxTopicsPerChat: 100,
+		HistoryPages:     8,
 	}
 }
 
@@ -172,11 +172,11 @@ func (c *Config) Normalize() {
 	if c.DataDir == "" {
 		c.DataDir = d.DataDir
 	}
-	if c.MaxTopicsPerChat <= 0 {
-		c.MaxTopicsPerChat = d.MaxTopicsPerChat
+	if c.MaxTopicsPerChat <= 0 || c.MaxTopicsPerChat < 100 {
+		c.MaxTopicsPerChat = 100
 	}
-	if c.HistoryPages <= 0 {
-		c.HistoryPages = d.HistoryPages
+	if c.HistoryPages <= 0 || c.HistoryPages < 8 {
+		c.HistoryPages = 8
 	}
 	c.DriveShareMode = DriveShareBotOnly
 	switch strings.ToLower(strings.TrimSpace(c.UploadMode)) {
