@@ -160,3 +160,78 @@ func TestReplyFastWithoutFullRefreshAndPreservesCache(t *testing.T) {
 		t.Fatalf("expected %d messages in cache after reply, got ok=%v len=%d", initialCount+1, ok, len(cached))
 	}
 }
+
+type strictZeroReadOnReplyAPI struct {
+	API
+	listCalls  int
+	getCalls   int
+	batchCalls int
+}
+
+func (a *strictZeroReadOnReplyAPI) ListMessages(ctx context.Context, typ, id, token string, desc bool) (*MsgPage, error) {
+	a.listCalls++
+	return a.API.ListMessages(ctx, typ, id, token, desc)
+}
+
+func (a *strictZeroReadOnReplyAPI) GetMessage(ctx context.Context, id string) ([]RawMessage, error) {
+	a.getCalls++
+	return a.API.GetMessage(ctx, id)
+}
+
+func (a *strictZeroReadOnReplyAPI) BatchUsers(ctx context.Context, ids []string) ([]User, error) {
+	a.batchCalls++
+	return a.API.BatchUsers(ctx, ids)
+}
+
+func TestReplyZeroNetworkReadsEvenWhenCacheHasPlaceholderOrExpired(t *testing.T) {
+	_, s := newTestServer(t)
+	ctx := context.Background()
+
+	base, err := s.threadMessages(ctx, "omt_mock_002", nil, false)
+	if err != nil || len(base) == 0 {
+		t.Fatalf("setup failed: %v", err)
+	}
+	rootID := base[0].MessageID
+	chatID := base[0].ChatID
+
+	// Append an interactive placeholder card and a merge_forward message to the cached thread
+	cardMsg := RawMessage{
+		MessageID:  "om_card_p2",
+		RootID:     rootID,
+		ThreadID:   "omt_mock_002",
+		ChatID:     chatID,
+		CreateTime: "1700000900000",
+		MsgType:    "interactive",
+	}
+	cardMsg.Body.Content = `{"title":"card","elements":[[{"tag":"text","text":"请升级至最新版本客户端，以查看内容"}]]}`
+
+	fwdMsg := RawMessage{
+		MessageID:  "om_fwd_p3",
+		RootID:     rootID,
+		ThreadID:   "omt_mock_002",
+		ChatID:     chatID,
+		CreateTime: "1700000901000",
+		MsgType:    "merge_forward",
+	}
+	fwdMsg.Body.Content = `{"text":"合并转发"}`
+
+	seed := append(append([]RawMessage{}, base...), cardMsg, fwdMsg)
+	s.cache.Set(s.k("thread:omt_mock_002"), seed)
+	// Pre-seed chats cache so chatName is cached
+	_, _ = s.Chats(ctx, false)
+
+	spy := &strictZeroReadOnReplyAPI{API: s.api}
+	s.api = spy
+
+	// Reply with Force=false (runs busy check + compose + render of sent message)
+	res, err := s.ReplyFull(ctx, "omt_mock_002", ReplyRequest{Text: "无阻塞发送测试", Force: false})
+	if err != nil {
+		t.Fatalf("ReplyFull failed: %v", err)
+	}
+	if len(res.Messages) == 0 {
+		t.Fatalf("expected sent message, got 0")
+	}
+	if spy.listCalls != 0 || spy.getCalls != 0 || spy.batchCalls != 0 {
+		t.Fatalf("expected 0 read API calls during ReplyFull, got list=%d get=%d batchUsers=%d", spy.listCalls, spy.getCalls, spy.batchCalls)
+	}
+}

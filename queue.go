@@ -521,7 +521,7 @@ func (s *Service) dispatchQueuedItem(ctx context.Context, threadID string, item 
 					tgt.topicFolder = s.topicDriveFolder(items, item.Text, pendingMID)
 				}
 			}
-		} else if raws, err := s.threadMessages(ctx, threadID, nil, false); err == nil && len(raws) > 0 {
+		} else if raws, err := s.threadMessagesForReply(ctx, threadID); err == nil && len(raws) > 0 {
 			tgt.rootID = rootMessageID(raws)
 			tgt.chatID = raws[0].ChatID
 			if tgt.topicFolder == "" {
@@ -703,8 +703,7 @@ func (s *Service) checkAndDispatchThread(threadID string) {
 	if chatID == "" {
 		chatID = nextItem.ChatID
 	}
-	r := s.render(ctx, raws)
-	busy, _ := s.topicBusyState(s.chatName(ctx, chatID), r.msgs, s.getLastSent(threadID), time.Now())
+	busy, _ := s.busyStateFromRaws(s.chatName(ctx, chatID), raws, s.getLastSent(threadID), time.Now())
 
 	q.mu.Lock()
 	wasBusy := q.wasBusy[threadID]
@@ -738,7 +737,9 @@ func (s *Service) checkAndDispatchThread(threadID string) {
 		return
 	}
 
-	if _, err := s.dispatchQueuedItem(ctx, threadID, toSend); err != nil {
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer sendCancel()
+	if _, err := s.dispatchQueuedItem(sendCtx, threadID, toSend); err != nil {
 		log.Printf("queue dispatch failed for %s (%s): %v", threadID, toSend.ID, err)
 	}
 }

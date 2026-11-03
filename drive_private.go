@@ -99,6 +99,12 @@ func verifyPrivatePermissions(p *DrivePermissionSnapshot, owner, bot, chatID str
 
 // Private folders never fall back to a potentially shared legacy folder.
 func (c *FeishuClient) privateFolder(ctx context.Context, parent, name string) (string, error) {
+	cacheKey := c.auth.UserID() + ":" + parent + ":" + name
+	if c.folderTokens != nil {
+		if tok, ok := c.folderTokens[cacheKey]; ok && tok != "" {
+			return tok, nil
+		}
+	}
 	page := ""
 	seen := map[string]bool{}
 	for {
@@ -123,6 +129,9 @@ func (c *FeishuClient) privateFolder(ctx context.Context, parent, name string) (
 			}
 			if err = verifyPrivateFolder(p, c.auth.UserID()); err != nil {
 				return "", fmt.Errorf("附件父目录权限不符合要求：%w", err)
+			}
+			if c.folderTokens != nil {
+				c.folderTokens[cacheKey] = f.Token
 			}
 			return f.Token, nil
 		}
@@ -150,6 +159,9 @@ func (c *FeishuClient) privateFolder(ctx context.Context, parent, name string) (
 	}
 	if err := verifyPrivateFolder(p, c.auth.UserID()); err != nil {
 		return "", err
+	}
+	if c.folderTokens != nil {
+		c.folderTokens[cacheKey] = f.Token
 	}
 	return f.Token, nil
 }

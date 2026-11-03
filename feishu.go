@@ -145,8 +145,9 @@ type FeishuClient struct {
 	// noCardParam is set once the server rejected card_msg_content_type and fallback succeeded.
 	noCardParam atomic.Bool
 	// rootTok caches the user's Drive root folder token.
-	rootTok  string
-	rootUser string
+	rootTok      string
+	rootUser     string
+	folderTokens map[string]string
 }
 
 // DriveTopicUploader is implemented by FeishuClient to upload attachments into
@@ -167,8 +168,9 @@ func NewFeishuClient(base, appID, appSecret string, auth *Auth, resourceAuth str
 		appSecret: appSecret,
 		auth:      auth,
 		resAuth:   resourceAuth,
-		hc:        &http.Client{},
-		gap:       25 * time.Millisecond, // ~40 req/s, below the documented 50/s
+		hc:           &http.Client{},
+		gap:          25 * time.Millisecond, // ~40 req/s, below the documented 50/s
+		folderTokens: map[string]string{},
 	}
 }
 
@@ -417,7 +419,7 @@ func (c *FeishuClient) call(ctx context.Context, id identity, path string, q url
 
 // callReq performs a JSON request and decodes envelope.data into out.
 func (c *FeishuClient) callReq(ctx context.Context, id identity, method, path string, q url.Values, body []byte, idempotent bool, out any) error {
-	return c.callReqCT(ctx, id, method, path, q, body, "application/json; charset=utf-8", 30*time.Second, idempotent, out)
+	return c.callReqCT(ctx, id, method, path, q, body, "application/json; charset=utf-8", 60*time.Second, idempotent, out)
 }
 
 func (c *FeishuClient) callReqCT(ctx context.Context, id identity, method, path string, q url.Values, body []byte, ctype string, timeout time.Duration, idempotent bool, out any) error {

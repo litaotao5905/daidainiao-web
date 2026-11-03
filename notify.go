@@ -228,8 +228,8 @@ func (m *NotifyManager) checkWatchedTasks() {
 		if err != nil || len(raws) == 0 {
 			continue
 		}
-		r := m.svc.render(ctx, raws)
-		busy, _ := m.svc.topicBusyState(t.ChatName, r.msgs, m.svc.getLastSent(t.ThreadID), time.Now())
+		msgs := m.svc.renderRecentForBusy(raws)
+		busy, _ := m.svc.topicBusyState(t.ChatName, msgs, m.svc.getLastSent(t.ThreadID), time.Now())
 
 		if busy {
 			t.WasBusy = true
@@ -239,17 +239,17 @@ func (m *NotifyManager) checkWatchedTasks() {
 		// Transitioned from busy -> finished!
 		if t.WasBusy && !t.Notified {
 			t.Notified = true
-			snippet := extractLatestSnippet(r.msgs)
-			if t.TopicTitle == "" && len(r.msgs) > 0 {
-				for _, m := range r.msgs {
-					if m.IsRoot {
-						t.TopicTitle = firstLine(m.Plain, 60)
+			snippet := extractLatestSnippet(msgs)
+			if t.TopicTitle == "" && len(raws) > 0 {
+				root := raws[0]
+				for i := range raws {
+					if isRoot(raws[i]) {
+						root = raws[i]
 						break
 					}
 				}
-				if t.TopicTitle == "" {
-					t.TopicTitle = firstLine(r.msgs[0].Plain, 60)
-				}
+				c := ParseContentOpts(root.MsgType, root.Body.Content, root.Mentions, m.svc.parseOpts())
+				t.TopicTitle = firstLine(firstNonEmpty(c.Title, c.Plain), 60)
 			}
 			webBase := m.svc.resolveWebBaseURL()
 			_, _ = m.NotifyTaskComplete(ctx, t.ThreadID, t.ChatName, t.TopicTitle, t.UserOpenID, snippet, webBase)

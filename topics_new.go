@@ -219,7 +219,7 @@ func (s *Service) ReplyFull(ctx context.Context, threadID string, req ReplyReque
 		raws = items
 		tgt.rootID, tgt.chatID, tgt.threadID = pendingMID, items[0].ChatID, items[0].ThreadID
 		if tgt.threadID != "" {
-			if traws, err := s.threadMessages(ctx, tgt.threadID, &items[0], false); err == nil && len(traws) > 0 {
+			if traws, err := s.threadMessagesForReply(ctx, tgt.threadID); err == nil && len(traws) > 0 {
 				raws = traws
 			}
 		}
@@ -228,16 +228,16 @@ func (s *Service) ReplyFull(ctx context.Context, threadID string, req ReplyReque
 		}
 	} else {
 		var err error
-		// 优先从本地历史缓存获取元数据与状态，避免发送时阻塞同步重拉历史消息导致超时
-		raws, err = s.threadMessages(ctx, threadID, s.knownRoot(threadID), false)
-		if err != nil || len(raws) == 0 {
-			raws, err = s.threadMessages(ctx, threadID, nil, false)
-			if err != nil {
-				return nil, err
-			}
+		// 直接从本地持久化缓存无锁读取历史消息（不受 2 分钟 TTL 或卡片占位符影响），彻底避免发送前同步阻塞拉取
+		raws, err = s.threadMessagesForReply(ctx, threadID)
+		if err != nil {
+			return nil, err
 		}
-		raws = s.ensureThreadRoot(ctx, threadID, raws)
 		tgt.rootID = rootMessageID(raws)
+		if tgt.rootID == "" || len(req.Attachments) > 0 {
+			raws = s.ensureThreadRoot(ctx, threadID, raws)
+			tgt.rootID = rootMessageID(raws)
+		}
 		if len(raws) > 0 {
 			tgt.chatID = raws[0].ChatID
 		}
@@ -256,8 +256,7 @@ func (s *Service) ReplyFull(ctx context.Context, threadID string, req ReplyReque
 
 	if !req.Force {
 		hasQ := s.hasActiveQueue(threadID)
-		r := s.render(ctx, raws)
-		busy, status := s.topicBusyState(s.chatName(ctx, tgt.chatID), r.msgs, s.getLastSent(threadID), time.Now())
+		busy, status := s.busyStateFromRaws(s.chatName(ctx, tgt.chatID), raws, s.getLastSent(threadID), time.Now())
 		if hasQ || busy {
 			if status == "" {
 				status = "⏳ 前序排队任务等待发送中…"

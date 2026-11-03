@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -730,5 +731,40 @@ func TestDriveShareModes(t *testing.T) {
 				t.Fatalf("did not expect link share to be closed")
 			}
 		})
+	}
+}
+
+func TestConcurrentMultiAttachmentUploadOrderAndVerification(t *testing.T) {
+	srv, svc := newTestServer(t)
+	h := srv.Handler()
+	f1, err := svc.Stage("test_att1.txt", strings.NewReader("content 1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2, err := svc.Stage("test_att2.txt", strings.NewReader("content 2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f3, err := svc.Stage("test_att3.txt", strings.NewReader("content 3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"text":"multi-upload test","attachments":["%s","%s","%s"],"encrypt":true}`, f1.ID, f2.ID, f3.ID)
+	rec, out := jsonReq(t, h, "POST", "/api/topics/omt_mock_002/reply", body)
+	if rec.Code != 200 {
+		t.Fatalf("reply failed: %d, %v", rec.Code, out)
+	}
+
+	msgs, ok := out["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("no messages returned: %v", out)
+	}
+
+	// Staged items should all be cleaned up from staging directory
+	for _, id := range []string{f1.ID, f2.ID, f3.ID} {
+		if _, _, err := svc.loadStaged(id); err == nil {
+			t.Fatalf("expected staged item %s to be unstaged after successful send", id)
+		}
 	}
 }

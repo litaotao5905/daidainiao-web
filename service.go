@@ -405,6 +405,18 @@ func (s *Service) threadMessages(ctx context.Context, threadID string, root *Raw
 	return out, nil
 }
 
+// threadMessagesForReply returns cached thread messages immediately without
+// checking TTL, card placeholders, or acquiring the per-thread network lock.
+// It only falls back to a network fetch when no local cache exists yet.
+func (s *Service) threadMessagesForReply(ctx context.Context, threadID string) ([]RawMessage, error) {
+	key := s.k("thread:" + threadID)
+	var cached []RawMessage
+	if _, ok := s.cache.Get(key, &cached); ok && len(cached) > 0 {
+		return cached, nil
+	}
+	return s.threadMessages(ctx, threadID, nil, false)
+}
+
 // appendSentToCache adds newly sent messages directly to the local cached thread,
 // preserving all immutable historical messages without requiring a full re-fetch.
 func (s *Service) appendSentToCache(threadID string, sent []RawMessage) {
@@ -553,6 +565,10 @@ func (s *Service) resolveUsers(ctx context.Context, ids []string, hints map[stri
 	res := map[string]User{}
 	var missing []string
 	seen := map[string]bool{}
+	if st := s.auth.Status(); st.User != nil && st.User.OpenID != "" && st.User.Name != "" {
+		res[st.User.OpenID] = User{OpenID: st.User.OpenID, Name: st.User.Name, Avatar: st.User.AvatarURL}
+		seen[st.User.OpenID] = true
+	}
 	for _, id := range ids {
 		if id == "" || seen[id] {
 			continue
@@ -804,6 +820,57 @@ func (s *Service) renderForward(rc *renderCtx, parentID string, byUpper map[stri
 		out = append(out, msg)
 	}
 	return out
+}
+
+// renderRecentForBusy parses only the tail messages in-memory without any
+// network requests (no GetMessage, forwardSubs, Chats, or BatchUsers).
+func (s *Service) renderRecentForBusy(raws []RawMessage) []Message {
+	if len(raws) == 0 {
+		return nil
+	}
+	const tailLimit = 20
+	start := 0
+	hasEarlierApp := false
+	if len(raws) > tailLimit {
+		start = len(raws) - tailLimit
+		for i := 0; i < start; i++ {
+			if raws[i].Sender.SenderType == "app" && !raws[i].Deleted {
+				hasEarlierApp = true
+				break
+			}
+		}
+	}
+	opts := s.parseOpts()
+	out := make([]Message, 0, len(raws)-start+1)
+	if hasEarlierApp {
+		out = append(out, Message{SenderType: "app"})
+	}
+	for i := start; i < len(raws); i++ {
+		m := raws[i]
+		msg := Message{
+			ID:         m.MessageID,
+			ParentID:   m.ParentID,
+			SenderID:   m.Sender.ID,
+			SenderType: m.Sender.SenderType,
+			Time:       msgTime(m),
+			MsgType:    m.MsgType,
+			Deleted:    m.Deleted,
+			Edited:     m.Updated,
+			IsRoot:     isRoot(m) && i == 0,
+		}
+		if m.Deleted {
+			msg.Plain = "[消息已撤回]"
+		} else {
+			c := ParseContentOpts(m.MsgType, m.Body.Content, m.Mentions, opts)
+			msg.Title, msg.Plain, msg.Card, msg.Notice = c.Title, c.Plain, c.Card, c.Notice
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+func (s *Service) busyStateFromRaws(chatName string, raws []RawMessage, lastSentMs int64, now time.Time) (bool, string) {
+	return s.topicBusyState(chatName, s.renderRecentForBusy(raws), lastSentMs, now)
 }
 
 func (s *Service) render(ctx context.Context, raws []RawMessage) rendered {

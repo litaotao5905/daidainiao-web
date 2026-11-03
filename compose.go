@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -328,6 +329,7 @@ func (s *Service) uploadOne(ctx context.Context, st *Staged, data []byte, chatID
 	if st.DriveBotMember != nil {
 		canonical, _ = canonicalBotMember(perms, owner, botIDs[0], st.DriveBotMember, allowChat)
 	}
+	needsReadback := false
 	if canonical == nil {
 		if st.DriveBotMember == nil {
 			if err := verifyPrivatePermissions(perms, owner, "", ""); err != nil {
@@ -348,14 +350,7 @@ func (s *Service) uploadOne(ctx context.Context, st *Staged, data []byte, chatID
 		if err := writeFileAtomic(filepath.Join(s.stageDir(), st.ID+".json"), b, 0o600); err != nil {
 			return nil, err
 		}
-	}
-	perms, err = s.api.DrivePermissions(ctx, token, "file")
-	if err != nil {
-		return nil, fmt.Errorf("验证附件权限失败：%w", err)
-	}
-	canonical, err = canonicalBotMember(perms, owner, botIDs[0], st.DriveBotMember, allowChat)
-	if err != nil {
-		return nil, err
+		needsReadback = true
 	}
 	if shareWithChat {
 		already := false
@@ -378,14 +373,7 @@ func (s *Service) uploadOne(ctx context.Context, st *Staged, data []byte, chatID
 			if err := writeFileAtomic(filepath.Join(s.stageDir(), st.ID+".json"), b, 0o600); err != nil {
 				return nil, err
 			}
-			perms, err = s.api.DrivePermissions(ctx, token, "file")
-			if err != nil {
-				return nil, fmt.Errorf("验证群阅读权限失败：%w", err)
-			}
-			canonical, err = canonicalBotMember(perms, owner, botIDs[0], st.DriveBotMember, chatID)
-			if err != nil {
-				return nil, err
-			}
+			needsReadback = true
 		} else if st.DriveShareChat != chatID {
 			st.DriveShareChat = chatID
 			b, _ := json.Marshal(st)
@@ -393,6 +381,16 @@ func (s *Service) uploadOne(ctx context.Context, st *Staged, data []byte, chatID
 				return nil, err
 			}
 		}
+	}
+	if needsReadback {
+		perms, err = s.api.DrivePermissions(ctx, token, "file")
+		if err != nil {
+			return nil, fmt.Errorf("验证附件权限失败：%w", err)
+		}
+	}
+	canonical, err = canonicalBotMember(perms, owner, botIDs[0], st.DriveBotMember, allowChat)
+	if err != nil {
+		return nil, err
 	}
 	chatCheck := ""
 	if shareWithChat {
@@ -414,9 +412,12 @@ func (s *Service) uploadOne(ctx context.Context, st *Staged, data []byte, chatID
 	if meta == nil || meta.OwnerID != owner {
 		return nil, fmt.Errorf("无法确认附件所有者为当前登录用户，停止发送")
 	}
-	link, err := s.api.DriveURL(ctx, token)
-	if err != nil {
-		return nil, err
+	link := meta.URL
+	if link == "" {
+		link, err = s.api.DriveURL(ctx, token)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &sendPart{Name: st.Name, StageI: st.ID, Staged: st, Data: data, Kind: "link", Key: token, URL: link, Folder: st.DriveFolder, SharedChat: st.DriveShareChat != ""}, nil
 }
@@ -640,12 +641,16 @@ func (s *Service) compose(ctx context.Context, tgt composeTarget, text string, m
 	var warns []string
 	var failed []string
 	seenIDs := map[string]bool{}
-	botIDs := s.resolveBotIDs(ctx, tgt, ms)
+	var uniqueIDs []string
 	for _, id := range attIDs {
-		if seenIDs[id] {
-			continue
+		if !seenIDs[id] {
+			seenIDs[id] = true
+			uniqueIDs = append(uniqueIDs, id)
 		}
-		seenIDs[id] = true
+	}
+	botIDs := s.resolveBotIDs(ctx, tgt, ms)
+	if len(uniqueIDs) == 1 {
+		id := uniqueIDs[0]
 		st, data, err := s.loadStaged(id)
 		if err != nil {
 			return nil, err
@@ -658,6 +663,51 @@ func (s *Service) compose(ctx context.Context, tgt composeTarget, text string, m
 			warns = append(warns, p.Warn)
 		}
 		parts = append(parts, p)
+	} else if len(uniqueIDs) > 1 {
+		type uploadResult struct {
+			idx  int
+			part *sendPart
+			warn string
+			err  error
+		}
+		resCh := make(chan uploadResult, len(uniqueIDs))
+		var wg sync.WaitGroup
+		for i, id := range uniqueIDs {
+			wg.Add(1)
+			go func(idx int, attID string) {
+				defer wg.Done()
+				st, data, err := s.loadStaged(attID)
+				if err != nil {
+					resCh <- uploadResult{idx: idx, err: err}
+					return
+				}
+				p, err := s.uploadOne(ctx, st, data, tgt.chatID, topicFolder, botIDs, tgt.shareWithChat)
+				if err != nil {
+					resCh <- uploadResult{idx: idx, err: err}
+					return
+				}
+				resCh <- uploadResult{idx: idx, part: p, warn: p.Warn}
+			}(i, id)
+		}
+		wg.Wait()
+		close(resCh)
+		orderedParts := make([]*sendPart, len(uniqueIDs))
+		var firstErr error
+		for res := range resCh {
+			if res.err != nil && firstErr == nil {
+				firstErr = res.err
+			}
+			if res.part != nil {
+				orderedParts[res.idx] = res.part
+			}
+			if res.warn != "" {
+				warns = append(warns, res.warn)
+			}
+		}
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		parts = orderedParts
 	}
 	msgs := assemble(text, ms, parts)
 	if len(msgs) == 0 {
