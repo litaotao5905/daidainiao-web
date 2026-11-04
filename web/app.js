@@ -940,6 +940,7 @@
           const img = el("img", "inline");
           img.loading = "lazy"; img.alt = "图片";
           img.src = resUrlRaw(msg.id, n.key, "image");
+          img.onload = () => { const b = $("messages"); if (b && shouldStickToBottom(b)) b.scrollTop = b.scrollHeight; };
           img.onerror = () => { img.replaceWith(failChip("图片", false, dlItem(msg.id, n.key))); markFailed(key); };
           img.onclick = () => openPreviewFor(msg.id, n.key, "image", "图片", "image");
           withFileMenu(img, () => dlItem(msg.id, n.key));
@@ -1389,17 +1390,33 @@
     appendMessages(box, t.messages);
     appendQueuedMessages(box, t.queue, t);
     if (scroll === "keep") {
+      stickToBottomUntil = 0;
       box.scrollTop = keepTop || 0;
     } else if (scroll === "top") {
+      stickToBottomUntil = 0;
       box.scrollTop = 0;
     } else {
+      stickToBottomUntil = Date.now() + 2500;
       box.scrollTop = box.scrollHeight;
       requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+      [50, 150, 300, 600, 1000].forEach((ms) => {
+        setTimeout(() => {
+          if (state.thread === t && shouldStickToBottom(box)) {
+            box.scrollTop = box.scrollHeight;
+          }
+        }, ms);
+      });
     }
+  }
+  let stickToBottomUntil = 0;
+  function shouldStickToBottom(box) {
+    return Date.now() < stickToBottomUntil || nearBottom(box);
   }
   function nearBottom(box) {
     return box.scrollHeight - box.scrollTop - box.clientHeight < 48;
   }
+  $("messages").addEventListener("wheel", () => { stickToBottomUntil = 0; }, { passive: true });
+  $("messages").addEventListener("touchmove", () => { stickToBottomUntil = 0; }, { passive: true });
   function threadSig(t) {
     if (!t || !t.topic) return "";
     const msgs = (t.messages || []).map((m) => [m.id, m.edited ? 1 : 0, m.deleted ? 1 : 0, m.time, m.plain || "", m.notice || "", (m.forwarded || []).length].join("\u0002")).join("\u0001");
