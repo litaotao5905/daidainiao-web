@@ -1333,7 +1333,7 @@
         const cur = input.value.trim();
         input.value = cur && qItem.text ? (qItem.text + "\n" + cur) : (qItem.text || cur);
         state.drafts[threadId] = input.value;
-        saveDrafts();
+        saveDrafts(true);
         for (const m of qItem.mentions || []) {
           if (!state.mentions.some((x) => x.id === m.id)) state.mentions.push(m);
         }
@@ -1341,7 +1341,7 @@
           replyTray.restoreStaged(qItem.attachments);
         }
         renderThread("keep", $("messages").scrollTop);
-        autosize();
+        autosize(true);
         input.focus();
       }
       toast("已撤回至输入框，可修改后重新发送", false);
@@ -1565,11 +1565,48 @@
   }
 
   // ---------- reply composer ----------
-  function saveDrafts() { try { sessionStorage.setItem("drafts", JSON.stringify(state.drafts)); } catch (_) { /* ignore */ } }
-  function autosize() {
+  let draftSaveTimer = null;
+  function flushDrafts() {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    try { sessionStorage.setItem("drafts", JSON.stringify(state.drafts)); } catch (_) { /* ignore */ }
+  }
+  function saveDrafts(immediate) {
+    if (immediate) {
+      flushDrafts();
+      return;
+    }
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+      draftSaveTimer = null;
+      try { sessionStorage.setItem("drafts", JSON.stringify(state.drafts)); } catch (_) { /* ignore */ }
+    }, 400);
+  }
+  window.addEventListener("beforeunload", flushDrafts);
+
+  const supportsFieldSizing = typeof CSS !== "undefined" && CSS.supports && CSS.supports("field-sizing", "content");
+  let autosizeRaf = null;
+  function autosize(force) {
     const i = $("replyInput");
-    i.style.height = "auto";
-    i.style.height = Math.min(i.scrollHeight, 180) + "px";
+    if (!i) return;
+    if (supportsFieldSizing) {
+      if (i.style.height) i.style.height = "";
+      return;
+    }
+    if (force) {
+      if (autosizeRaf) { cancelAnimationFrame(autosizeRaf); autosizeRaf = null; }
+      i.style.height = "auto";
+      i.style.height = Math.min(i.scrollHeight, 180) + "px";
+      return;
+    }
+    if (autosizeRaf) return;
+    autosizeRaf = requestAnimationFrame(() => {
+      autosizeRaf = null;
+      i.style.height = "auto";
+      i.style.height = Math.min(i.scrollHeight, 180) + "px";
+    });
   }
   function setReplyErr(e, kind) {
     const box = $("replyErr"); box.textContent = "";
@@ -1629,7 +1666,7 @@
     $("btnAttach").disabled = !can || state.sending;
     i.placeholder = (t.topic.pending ? "回复以创建话题…" : (qBusy ? "输入下一条指令（将自动排队，待当前任务结束后发出）…" : "回复话题…")) + "（Enter 发送，Shift+Enter 换行）";
     updateReplyHint();
-    autosize();
+    autosize(true);
   }
   // optimistic rendering of what the user typed
   function localParas(text, mentions) {
@@ -1759,7 +1796,7 @@
     const pb = pendRow.querySelector(".bubble"); if (pb) localExtras(pb, items);
     box.scrollTop = box.scrollHeight;
     const draftKey = threadId;
-    input.value = ""; delete state.drafts[threadId]; saveDrafts(); autosize();
+    input.value = ""; delete state.drafts[threadId]; saveDrafts(true); autosize(true);
     try {
       const r = await api("/api/topics/" + encodeURIComponent(threadId) + "/reply", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1813,12 +1850,12 @@
     } catch (e) {
       if (pendRow && pendRow.isConnected) pendRow.remove();
       // keep what was typed (and the attachments) so it can be sent again
-      state.drafts[draftKey] = text; saveDrafts();
+      state.drafts[draftKey] = text; saveDrafts(true);
       state.sending = false;
       if (uploadScopeErr(e)) { state.auth.can_upload = false; state.uploadScopeErr = e; }
       else if (isScopeErr(e)) { state.auth.can_reply = false; state.scopeErr = e; }
       if (state.active === draftKey) {
-        input.value = text; autosize(); renderComposer();
+        input.value = text; autosize(true); renderComposer();
         if (!isScopeErr(e) || uploadScopeErr(e)) setReplyErr(e); // missing-send-scope is explained by the re-login notice
       }
     }
@@ -1834,8 +1871,15 @@
   const replyMention = createMentionPicker($("mentionPop"), $("replyInput"), participants, state.mentions);
   const replyTray = createTray($("replyTray"), $("replyFile"), $("btnAttach"), $("composer"), $("replyInput"), () => { if (!$("composer").hidden) { $("btnSend").disabled = state.auth.can_reply === false || state.sending || replyTray.uploading(); updateReplyHint(); } });
   $("replyInput").addEventListener("input", () => {
-    const t = state.thread; if (t) { state.drafts[t.topic.thread_id] = $("replyInput").value; saveDrafts(); }
-    autosize();
+    const t = state.thread;
+    if (t) {
+      state.drafts[t.topic.thread_id] = $("replyInput").value;
+      saveDrafts(false);
+    }
+    autosize(false);
+  });
+  $("replyInput").addEventListener("blur", () => {
+    flushDrafts();
   });
   $("replyInput").addEventListener("keydown", (e) => {
     if (e.key === "Escape") { replyMention.close(); return; }
