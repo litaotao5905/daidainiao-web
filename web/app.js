@@ -1378,6 +1378,9 @@
 
     const row = el("div", "msg" + (em.turn_number === 1 && !isBot && !isTopic ? " root" : ""));
     row.id = "enc-" + em.id;
+    row.setAttribute("data-turn", String(em.turn_number || 0));
+    row.setAttribute("data-source", em.source || "parsed");
+    row.setAttribute("data-role", em.role || "");
     row.appendChild(avatar(senderName, senderAvatar, false, isBot || isTopic));
 
     const body = el("div", "msg-body");
@@ -1629,6 +1632,26 @@
   }
   function renderThread(scroll, keepTop) {
     const box = $("messages"), t = state.thread;
+    const currentScrollTop = (keepTop !== undefined && keepTop !== null) ? keepTop : (box ? box.scrollTop : 0);
+    const wasNearBottom = box ? nearBottom(box) : false;
+
+    // 记录视口当前停留位置的锚点信息（用于切换分类或刷新后精准对齐停留位置）
+    let anchorId = null;
+    let anchorTurn = null;
+    let anchorOffset = 0;
+    if (box && box.firstElementChild) {
+      const msgs = box.querySelectorAll(".msg");
+      for (const m of msgs) {
+        const top = m.offsetTop - box.offsetTop;
+        if (top >= currentScrollTop - 30) {
+          anchorId = m.id;
+          anchorTurn = m.getAttribute("data-turn");
+          anchorOffset = top - currentScrollTop;
+          break;
+        }
+      }
+    }
+
     box.textContent = ""; box.dataset.lastDay = ""; $("chatWarn").textContent = "";
     renderComposer();
     if (!t) {
@@ -1663,7 +1686,43 @@
     }
     if (scroll === "keep") {
       stickToBottomUntil = 0;
-      box.scrollTop = keepTop || 0;
+      if (wasNearBottom) {
+        box.scrollTop = box.scrollHeight;
+      } else {
+        let restored = false;
+        // 1. 精确 ID 匹配
+        if (anchorId) {
+          const target = document.getElementById(anchorId);
+          if (target && target.parentElement === box) {
+            box.scrollTop = Math.max(0, (target.offsetTop - box.offsetTop) - anchorOffset);
+            restored = true;
+          }
+        }
+        // 2. 相同 Turn 轮次匹配（切换分类展示时，对齐到同一交互轮次）
+        if (!restored && anchorTurn && anchorTurn !== "0") {
+          const target = box.querySelector('.msg[data-turn="' + anchorTurn + '"]');
+          if (target) {
+            box.scrollTop = Math.max(0, target.offsetTop - box.offsetTop);
+            restored = true;
+          }
+        }
+        // 3. 寻找邻近的较早轮次
+        if (!restored && anchorTurn && anchorTurn !== "0") {
+          const num = parseInt(anchorTurn, 10);
+          for (let tn = num - 1; tn >= 1; tn--) {
+            const target = box.querySelector('.msg[data-turn="' + tn + '"]');
+            if (target) {
+              box.scrollTop = Math.max(0, target.offsetTop - box.offsetTop);
+              restored = true;
+              break;
+            }
+          }
+        }
+        // 4. 兜底恢复到原 scrollTop（防止溢出）
+        if (!restored) {
+          box.scrollTop = Math.max(0, Math.min(currentScrollTop, box.scrollHeight - box.clientHeight));
+        }
+      }
     } else if (scroll === "top") {
       stickToBottomUntil = 0;
       box.scrollTop = 0;
@@ -2233,10 +2292,13 @@
       const btn = e.target.closest(".enc-filter-btn");
       if (!btn) return;
       const filter = btn.dataset.filter || "all";
+      if (state.encFilter === filter) return;
+      const box = $("messages");
+      const currentTop = box ? box.scrollTop : 0;
       state.encFilter = filter;
       localStorage.setItem("feishu_enc_filter", filter);
       updateEncryptedFilterButtons();
-      renderThread("keep");
+      renderThread("keep", currentTop);
     });
   }
   $("btnMention").onclick = () => replyMention.toggle();
