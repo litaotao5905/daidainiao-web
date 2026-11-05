@@ -6,6 +6,7 @@
     byChat: {}, errors: {}, warnings: new Set(), loading: new Set(),
     topics: [], active: null, thread: null, preview: null, search: "",
     listTab: localStorage.getItem("feishu_list_tab") || "my",
+    encFilter: localStorage.getItem("feishu_enc_filter") || "all",
     myTopics: [], myLoading: false, myLoaded: false, myError: null,
     failed: new Set(), drafts: {}, mentions: [], sending: false, composerThread: null,
     viewGen: 0,
@@ -1369,20 +1370,30 @@
 
   function renderEncryptedMessage(em) {
     const isBot = em.role === "assistant";
+    const isTopic = em.source === "topic";
     const me = state.auth.user || {};
-    const senderName = isBot ? "呆呆鸟" : (me.name || "我");
-    const senderAvatar = isBot ? botAvatarUrl() : (me.avatar_url || "");
+    const senderName = isTopic ? "呆呆鸟" : (isBot ? "呆呆鸟" : (me.name || "我"));
+    const senderAvatar = (isBot || isTopic) ? botAvatarUrl() : (me.avatar_url || "");
     const timeMs = em.created_at ? new Date(em.created_at).getTime() : Date.now();
 
-    const row = el("div", "msg" + (em.turn_number === 1 && !isBot ? " root" : ""));
+    const row = el("div", "msg" + (em.turn_number === 1 && !isBot && !isTopic ? " root" : ""));
     row.id = "enc-" + em.id;
-    row.appendChild(avatar(senderName, senderAvatar, false, isBot));
+    row.appendChild(avatar(senderName, senderAvatar, false, isBot || isTopic));
 
     const body = el("div", "msg-body");
     const head = el("div", "msg-head");
     head.appendChild(el("span", "name", senderName));
-    if (isBot) head.appendChild(el("span", "tag", "BOT"));
-    head.appendChild(el("span", "tag" + (em.turn_number === 1 && !isBot ? " root" : ""), "Turn " + em.turn_number));
+    if (isBot || isTopic) head.appendChild(el("span", "tag", "BOT"));
+    if (em.turn_number > 0) {
+      head.appendChild(el("span", "tag" + (em.turn_number === 1 && !isBot && !isTopic ? " root" : ""), "Turn " + em.turn_number));
+    }
+
+    // 分类展示标签
+    if (isTopic) {
+      head.appendChild(el("span", "source-tag source-topic", "💬 话题记录"));
+    } else {
+      head.appendChild(el("span", "source-tag source-parsed", "📄 文档解析"));
+    }
 
     const tm = el("span", null, fmtTime(timeMs));
     tm.title = fmtTime(timeMs, true);
@@ -1390,13 +1401,21 @@
 
     if (em.status === "running") {
       head.appendChild(el("span", "tag qtag run", "🚀 正在文档中落盘…"));
-    } else if (em.is_frozen) {
+    } else if (em.is_frozen && !isTopic) {
       head.appendChild(el("span", "msg-frozen-tag", "🔒 已固化"));
     }
     body.appendChild(head);
 
-    const bubble = el("div", "bubble" + (isBot ? " bot-bubble" : " user-bubble"));
-    if (isBot) {
+    const bubble = el("div", "bubble" + (isBot || isTopic ? " bot-bubble" : " user-bubble"));
+    if (isTopic) {
+      if (em.card) {
+        bubble.appendChild(renderCard(em.card, em, null));
+      } else {
+        const p = el("p", "msg-para");
+        p.textContent = em.content;
+        bubble.appendChild(p);
+      }
+    } else if (isBot) {
       if (em.status === "running") {
         const runBox = el("div", "enc-running-box");
         runBox.append(el("span", "spin-dot"), "呆呆鸟正在飞书专属文档中撰写回复，完成后将自动同步至此处…");
@@ -1434,7 +1453,25 @@
 
   function appendEncryptedMessages(box, encMsgs) {
     let lastDay = box.dataset.lastDay || "";
-    for (const em of encMsgs) {
+    const filter = state.encFilter || "all";
+    const filteredMsgs = (encMsgs || []).filter(m => {
+      if (filter === "all") return true;
+      if (filter === "parsed") return m.source === "parsed" || !m.source;
+      if (filter === "topic") return m.source === "topic";
+      return true;
+    });
+
+    if (filteredMsgs.length === 0 && (encMsgs || []).length > 0) {
+      const emptyNote = el("div", "enc-empty-filter-note", filter === "parsed" ? "当前无文档解析记录" : "当前无话题直接记录");
+      emptyNote.style.textAlign = "center";
+      emptyNote.style.padding = "24px";
+      emptyNote.style.color = "var(--muted)";
+      emptyNote.style.fontSize = "13px";
+      box.appendChild(emptyNote);
+      return;
+    }
+
+    for (const em of filteredMsgs) {
       const timeMs = em.created_at ? new Date(em.created_at).getTime() : Date.now();
       const d = new Date(timeMs).toDateString();
       if (d !== lastDay) {
@@ -2190,6 +2227,18 @@
       }
     });
   }
+  const encFilterGroup = $("encFilterGroup");
+  if (encFilterGroup) {
+    encFilterGroup.addEventListener("click", (e) => {
+      const btn = e.target.closest(".enc-filter-btn");
+      if (!btn) return;
+      const filter = btn.dataset.filter || "all";
+      state.encFilter = filter;
+      localStorage.setItem("feishu_enc_filter", filter);
+      updateEncryptedFilterButtons();
+      renderThread("keep");
+    });
+  }
   $("btnMention").onclick = () => replyMention.toggle();
   document.addEventListener("mousedown", (e) => { if (!e.target.closest("#mentionPop, #btnMention")) replyMention.close(); });
 
@@ -2430,6 +2479,20 @@
     } catch (_) {}
   }
 
+  function updateEncryptedFilterButtons() {
+    const group = $("encFilterGroup");
+    if (!group) return;
+    const current = state.encFilter || "all";
+    const btns = group.querySelectorAll(".enc-filter-btn");
+    btns.forEach(btn => {
+      if (btn.dataset.filter === current) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
+  }
+
   function updateEncryptedUI(thread) {
     const banner = $("encDocBanner");
     const toolbar = $("composerEncToolbar");
@@ -2437,6 +2500,7 @@
       toolbar.hidden = false;
       const sel = $("contextLimitSelect");
       if (sel) sel.value = String((thread && thread.context_limit) ? thread.context_limit : -1);
+      updateEncryptedFilterButtons();
     }
     if (!banner) return;
     if (thread && thread.doc_token) {

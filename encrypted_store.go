@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,13 +26,16 @@ type EncryptedThread struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// EncryptedMessage represents a user prompt or assistant reply inside an encrypted session.
+// EncryptedMessage represents a user prompt, assistant reply, or topic runner card in an encrypted session.
 type EncryptedMessage struct {
 	ID          string    `json:"id"`
 	ThreadID    string    `json:"thread_id"`
 	TurnNumber  int       `json:"turn_number"`
-	Role        string    `json:"role"` // "user" | "assistant"
+	Role        string    `json:"role"`   // "user" | "assistant" | "system"
+	Source      string    `json:"source"` // "topic" (话题记录) | "parsed" (文档解析)
 	Content     string    `json:"content"`
+	Card        *Card     `json:"card,omitempty"`
+	RawMsgID    string    `json:"raw_msg_id,omitempty"`
 	Attachments []string  `json:"attachments,omitempty"`
 	Artifacts   []string  `json:"artifacts,omitempty"`
 	IsFrozen    bool      `json:"is_frozen"`
@@ -85,6 +89,14 @@ func (s *EncryptedStore) load() {
 		}
 		if d.Messages == nil {
 			d.Messages = make(map[string][]EncryptedMessage)
+		}
+		for tid, msgs := range d.Messages {
+			for i := range msgs {
+				if msgs[i].Source == "" {
+					msgs[i].Source = "parsed"
+				}
+			}
+			d.Messages[tid] = msgs
 		}
 		s.data = d
 	}
@@ -197,6 +209,9 @@ func (s *EncryptedStore) AddMessage(msg EncryptedMessage) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if msg.Source == "" {
+		msg.Source = "parsed"
+	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
@@ -229,11 +244,12 @@ func (s *EncryptedStore) UpdateAssistantTurn(threadID string, turnNumber int, co
 	msgs := s.data.Messages[threadID]
 	found := false
 	for i := range msgs {
-		if msgs[i].TurnNumber == turnNumber && msgs[i].Role == "assistant" {
+		if msgs[i].TurnNumber == turnNumber && msgs[i].Role == "assistant" && (msgs[i].Source == "parsed" || msgs[i].Source == "") {
 			msgs[i].Content = content
 			msgs[i].Artifacts = artifacts
 			msgs[i].Status = status
 			msgs[i].IsFrozen = isFrozen
+			msgs[i].Source = "parsed"
 			msgs[i].UpdatedAt = time.Now()
 			found = true
 			break
@@ -245,6 +261,7 @@ func (s *EncryptedStore) UpdateAssistantTurn(threadID string, turnNumber int, co
 			ThreadID:    threadID,
 			TurnNumber:  turnNumber,
 			Role:        "assistant",
+			Source:      "parsed",
 			Content:     content,
 			Artifacts:   artifacts,
 			IsFrozen:    isFrozen,
@@ -253,6 +270,114 @@ func (s *EncryptedStore) UpdateAssistantTurn(threadID string, turnNumber int, co
 			UpdatedAt:   time.Now(),
 		})
 	}
+	s.saveLocked()
+}
+
+// SyncTopicCards merges interactive cards (such as Claude Code status cards) from the topic into the encrypted store.
+func (s *EncryptedStore) SyncTopicCards(threadID string, topicMsgs []Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing := make(map[string]bool)
+	for _, m := range s.data.Messages[threadID] {
+		if m.RawMsgID != "" {
+			existing[m.RawMsgID] = true
+		}
+		existing[m.ID] = true
+	}
+
+	type turnTime struct {
+		turn int
+		time time.Time
+	}
+	var turnTimes []turnTime
+	for _, m := range s.data.Messages[threadID] {
+		if m.Role == "user" && (m.Source == "parsed" || m.Source == "") {
+			turnTimes = append(turnTimes, turnTime{turn: m.TurnNumber, time: m.CreatedAt})
+		}
+	}
+	sort.Slice(turnTimes, func(i, j int) bool {
+		return turnTimes[i].turn < turnTimes[j].turn
+	})
+
+	for _, tm := range topicMsgs {
+		if tm.Card == nil {
+			continue
+		}
+		title := tm.Card.Title
+		isRunnerCard := strings.Contains(title, "Claude Code") ||
+			strings.Contains(title, "运行结束") ||
+			strings.Contains(title, "已停止") ||
+			strings.Contains(title, "Model Selection") ||
+			strings.Contains(title, "运行") ||
+			strings.Contains(title, "Claude") ||
+			strings.Contains(title, "Agent") ||
+			strings.Contains(title, "执行") ||
+			tm.SenderType == "app"
+
+		if !isRunnerCard && title == "" {
+			continue
+		}
+
+		cardID := "topic_" + tm.ID
+		if existing[tm.ID] || existing[cardID] {
+			continue
+		}
+
+		msgTime := time.UnixMilli(tm.Time)
+		cardTurn := 0
+		for i := len(turnTimes) - 1; i >= 0; i-- {
+			if msgTime.After(turnTimes[i].time.Add(-5 * time.Second)) {
+				cardTurn = turnTimes[i].turn
+				break
+			}
+		}
+
+		plainText := tm.Plain
+		if plainText == "" {
+			plainText = title
+		}
+
+		s.data.Messages[threadID] = append(s.data.Messages[threadID], EncryptedMessage{
+			ID:         cardID,
+			ThreadID:   threadID,
+			TurnNumber: cardTurn,
+			Role:       "assistant",
+			Source:     "topic",
+			Content:    plainText,
+			Card:       tm.Card,
+			RawMsgID:   tm.ID,
+			IsFrozen:   true,
+			Status:     "done",
+			CreatedAt:  msgTime,
+			UpdatedAt:  msgTime,
+		})
+		existing[tm.ID] = true
+		existing[cardID] = true
+	}
+
+	// Sort messages: by turn_number asc, then user prompt first, then doc reply, then topic card
+	msgs := s.data.Messages[threadID]
+	sort.SliceStable(msgs, func(i, j int) bool {
+		if msgs[i].TurnNumber != msgs[j].TurnNumber {
+			return msgs[i].TurnNumber < msgs[j].TurnNumber
+		}
+		order := func(m EncryptedMessage) int {
+			if m.Role == "user" {
+				return 1
+			}
+			if m.Source == "parsed" {
+				return 2
+			}
+			return 3 // topic card
+		}
+		oi, oj := order(msgs[i]), order(msgs[j])
+		if oi != oj {
+			return oi < oj
+		}
+		return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
+	})
+	s.data.Messages[threadID] = msgs
 	s.saveLocked()
 }
 
@@ -278,7 +403,7 @@ func (s *EncryptedStore) GetLatestTurnNumber(threadID string) int {
 	msgs := s.data.Messages[threadID]
 	maxTurn := 0
 	for _, m := range msgs {
-		if m.TurnNumber > maxTurn {
+		if (m.Role == "user" || m.Source == "parsed") && m.TurnNumber > maxTurn {
 			maxTurn = m.TurnNumber
 		}
 	}

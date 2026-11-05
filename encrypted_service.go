@@ -183,6 +183,7 @@ func (s *Service) SendEncryptedTurn(ctx context.Context, threadID, prompt string
 		ThreadID:    threadID,
 		TurnNumber:  turnNumber,
 		Role:        "user",
+		Source:      "parsed",
 		Content:     prompt,
 		Attachments: attachments,
 		IsFrozen:    true,
@@ -198,6 +199,7 @@ func (s *Service) SendEncryptedTurn(ctx context.Context, threadID, prompt string
 		ThreadID:   threadID,
 		TurnNumber: turnNumber,
 		Role:       "assistant",
+		Source:     "parsed",
 		Content:    "*(呆呆鸟正在云文档中输出，完成后将自动同步...)*",
 		IsFrozen:   false,
 		Status:     "running",
@@ -274,6 +276,11 @@ func (s *Service) SyncEncryptedDoc(ctx context.Context, threadID string) (*Encry
 				}
 			}
 		}
+	}
+
+	// Also sync topic interactive status cards (such as Claude Code status cards) into the encrypted store
+	if tr, err := s.Thread(ctx, threadID, false); err == nil && tr != nil && len(tr.Messages) > 0 {
+		s.encryptedStore.SyncTopicCards(threadID, tr.Messages)
 	}
 
 	msgs := s.encryptedStore.GetMessages(threadID)

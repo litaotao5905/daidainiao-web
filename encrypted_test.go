@@ -74,6 +74,62 @@ func TestFormatAndParseEncryptedDocContent(t *testing.T) {
 	}
 }
 
+func TestEncryptedMessageClassificationAndCardSync(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "enc_classify_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store := NewEncryptedStore(tmpDir)
+	threadID := "omt_classify_123"
+
+	// 1. User sends Turn 1
+	now := time.Now()
+	store.AddMessage(EncryptedMessage{
+		ID:         "msg_t1_user",
+		ThreadID:   threadID,
+		TurnNumber: 1,
+		Role:       "user",
+		Source:     "parsed",
+		Content:    "请输出报价单",
+		CreatedAt:  now,
+	})
+	store.UpdateAssistantTurn(threadID, 1, "这是报价单明细", nil, "done", true)
+
+	// 2. Sync interactive card from Feishu topic
+	topicMsgs := []Message{
+		{
+			ID:   "om_card_001",
+			Time: now.Add(2 * time.Second).UnixMilli(),
+			Card: &Card{
+				Title:    "✅ Claude Code · 运行结束",
+				Template: "green",
+			},
+			Plain: "Claude Code · 运行结束",
+		},
+	}
+	store.SyncTopicCards(threadID, topicMsgs)
+
+	msgs := store.GetMessages(threadID)
+	if len(msgs) != 3 {
+		t.Fatalf("期望 3 条消息（用户提问 + 文档回复 + 话题状态卡片），实际 %d", len(msgs))
+	}
+
+	// Message 1: User prompt (parsed)
+	if msgs[0].Role != "user" || msgs[0].Source != "parsed" || msgs[0].TurnNumber != 1 {
+		t.Errorf("第 1 条消息分类错误: %+v", msgs[0])
+	}
+	// Message 2: Assistant reply (parsed)
+	if msgs[1].Role != "assistant" || msgs[1].Source != "parsed" || msgs[1].Content != "这是报价单明细" {
+		t.Errorf("第 2 条消息分类错误: %+v", msgs[1])
+	}
+	// Message 3: Runner card (topic)
+	if msgs[2].Role != "assistant" || msgs[2].Source != "topic" || msgs[2].Card == nil || msgs[2].Card.Title != "✅ Claude Code · 运行结束" {
+		t.Errorf("第 3 条消息分类错误: %+v", msgs[2])
+	}
+}
+
 func TestBuildDocxTextBlocks(t *testing.T) {
 	md := `# 标题一
 ## 标题二
