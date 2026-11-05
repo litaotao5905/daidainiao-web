@@ -1824,7 +1824,7 @@
     try {
       let r;
       if (state.status && state.status.encrypted) {
-        const selLimit = $("contextLimitSelect") ? parseInt($("contextLimitSelect").value, 10) : 10;
+        const selLimit = $("contextLimitSelect") ? parseInt($("contextLimitSelect").value, 10) : -1;
         r = await api("/api/encrypted/thread/" + encodeURIComponent(threadId) + "/reply", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: text, attachments: items.map((i) => i.name || i.uploadId), context_limit: selLimit }),
@@ -2174,18 +2174,20 @@
   function updateEncryptedUI(thread) {
     const banner = $("encDocBanner");
     const toolbar = $("composerEncToolbar");
-    if (!banner || !toolbar) return;
+    if (toolbar && state.status && state.status.encrypted) {
+      toolbar.hidden = false;
+      const sel = $("contextLimitSelect");
+      if (sel) sel.value = String((thread && thread.context_limit) ? thread.context_limit : -1);
+    }
+    if (!banner) return;
     if (thread && thread.doc_token) {
       banner.hidden = false;
-      toolbar.hidden = false;
       const docLink = $("encDocLink");
       const folderLink = $("encFolderLink");
       const statusText = $("encDocStatus");
       if (docLink) docLink.href = thread.doc_url || ("https://open.feishu.cn/docx/" + thread.doc_token);
       if (folderLink) folderLink.href = thread.folder_url || "#";
       if (statusText) statusText.textContent = "密态云文档 1:1 绑定 (" + (thread.title || "已就绪") + ")";
-      const sel = $("contextLimitSelect");
-      if (sel) sel.value = String(thread.context_limit ?? 10);
     } else {
       banner.hidden = true;
     }

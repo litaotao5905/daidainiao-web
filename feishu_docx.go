@@ -80,7 +80,9 @@ func (c *FeishuClient) AppendDocxChildren(ctx context.Context, docToken, parentB
 	}
 	payload := map[string]any{
 		"children": children,
-		"index":    index,
+	}
+	if index >= 0 {
+		payload["index"] = index
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {

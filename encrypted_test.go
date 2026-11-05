@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -263,4 +265,34 @@ func TestVerifyStrictPermissionsSnapshot(t *testing.T) {
 	if err := VerifyStrictPermissionsSnapshot(thirdPartyLeak, owner, bot); err == nil {
 		t.Fatalf("第三方非白名单成员必须拦截")
 	}
+}
+
+func TestLiveEncryptedDoc(t *testing.T) {
+	configPath := os.Getenv("DAIDAINIAO_LIVE_CONFIG")
+	if configPath == "" {
+		t.Skip("skipping live test without DAIDAINIAO_LIVE_CONFIG")
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Normalize()
+	dataDir := cfg.DataDir
+	if v := os.Getenv("DAIDAINIAO_LIVE_DATA"); v != "" {
+		dataDir = v
+	}
+	cfg.DataDir = dataDir
+	auth := NewAuth(cfg, false, filepath.Join(cfg.DataDir, "token.json"))
+	if !auth.LoggedIn() {
+		t.Fatal("auth not logged in")
+	}
+	client := NewFeishuClient(cfg.BaseURL, cfg.AppID, cfg.AppSecret, auth, "auto")
+	svc := NewService(client, NewCache(filepath.Join(cfg.DataDir, "cache")), cfg, auth)
+
+	ctx := context.Background()
+	thread, err := svc.EnsureEncryptedDoc(ctx, "omt_1989d661cf0f1bb7", "北京现代运维手册")
+	if err != nil {
+		t.Fatalf("EnsureEncryptedDoc failed: %v", err)
+	}
+	t.Logf("Created/Ensured encrypted doc: doc_token=%s url=%s folder=%s", thread.DocToken, thread.DocURL, thread.FolderURL)
 }

@@ -48,8 +48,8 @@ func VerifyStrictPermissionsSnapshot(snap *DrivePermissionSnapshot, ownerID, bot
 			ownerFound = true
 			continue
 		}
-		// Is bot?
-		if (m.MemberType+":"+m.ID == botID || m.ID == strings.TrimPrefix(botID, "openid:")) && (m.Perm == "edit" || m.Perm == "view" || m.Perm == "full_access") {
+		// Is bot? (Feishu lists application collaborators as member_type=="appid" or type=="app")
+		if ((m.MemberType == "appid" || m.Type == "app") || (m.MemberType+":"+m.ID == botID || m.ID == strings.TrimPrefix(botID, "openid:"))) && (m.Perm == "edit" || m.Perm == "view" || m.Perm == "full_access") {
 			botFound = true
 			continue
 		}
@@ -80,9 +80,9 @@ func (c *FeishuClient) EnsureDocxStrictlyPrivate(ctx context.Context, docToken, 
 		botID = RedDaidainiaoBotOpenID
 	}
 	// Grant edit permission to bot so it can write assistant response into the docx
-	if _, err := c.DriveShareMember(ctx, docToken, "openid", botID, "edit"); err != nil {
-		// Some tenants or configurations might return duplicate or app error; try appid if openid fails
-		if !strings.Contains(err.Error(), "already") && !strings.Contains(err.Error(), "duplicate") {
+	if _, err := c.DriveShareMemberType(ctx, docToken, "docx", "openid", botID, "edit"); err != nil {
+		// Some tenants or configurations might return duplicate or app error; ignore if already a member
+		if !strings.Contains(err.Error(), "already") && !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "1061001") {
 			return fmt.Errorf("授予呆呆鸟机器人文档协作者权限失败：%w", err)
 		}
 	}

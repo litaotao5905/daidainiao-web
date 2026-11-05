@@ -16,7 +16,7 @@ func (s *Service) EnsureEncryptedDoc(ctx context.Context, threadID, title string
 		s.encryptedStore = NewEncryptedStore(s.cfg.DataDir)
 	}
 
-	limit := 10
+	limit := -1 // 默认仅本轮 (极致隐私/无历史)
 	if existing, ok := s.encryptedStore.GetThread(threadID); ok {
 		if existing.DocToken != "" {
 			return existing, nil
@@ -36,6 +36,25 @@ func (s *Service) EnsureEncryptedDoc(ctx context.Context, threadID, title string
 		ownerName = st.User.Name
 	}
 
+	if title == "" {
+		if raws, err := s.threadMessagesForReply(ctx, threadID); err == nil && len(raws) > 0 {
+			root := raws[0]
+			for _, m := range raws {
+				if isRoot(m) {
+					root = m
+					break
+				}
+			}
+			parsed := ParseContent(root.MsgType, root.Body.Content, root.Mentions)
+			t := firstLine(parsed.Plain, 60)
+			if t != "" {
+				title = t
+			}
+		}
+	}
+	title = strings.ReplaceAll(title, "/", "_")
+	title = strings.ReplaceAll(title, "\\", "_")
+	title = strings.TrimSpace(title)
 	if title == "" {
 		title = fmt.Sprintf("会话_%s", threadID)
 	}
@@ -130,8 +149,12 @@ func (s *Service) SendEncryptedTurn(ctx context.Context, threadID, prompt string
 		return nil, fmt.Errorf("初始化会话文档失败：%w", err)
 	}
 
-	if contextLimit == 0 && thread.ContextLimit != 0 {
-		contextLimit = thread.ContextLimit
+	if contextLimit == 0 {
+		if thread.ContextLimit != 0 {
+			contextLimit = thread.ContextLimit
+		} else {
+			contextLimit = -1
+		}
 	}
 
 	// Calculate turn number

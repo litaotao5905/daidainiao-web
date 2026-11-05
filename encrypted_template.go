@@ -172,12 +172,7 @@ func BuildDocxTextBlocks(text string) []map[string]any {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "> ") {
-			blocks = append(blocks, map[string]any{
-				"block_type": 17, // Quote
-				"quote_container": map[string]any{},
-			})
-			// Followed by quote text
-			blocks = append(blocks, makeTextBlock(strings.TrimPrefix(trimmed, "> ")))
+			blocks = append(blocks, makeQuoteBlock(strings.TrimPrefix(trimmed, "> ")))
 			continue
 		}
 		// Default paragraph
@@ -185,6 +180,21 @@ func BuildDocxTextBlocks(text string) []map[string]any {
 	}
 
 	return blocks
+}
+
+func makeQuoteBlock(content string) map[string]any {
+	return map[string]any{
+		"block_type": 15, // Quote
+		"quote": map[string]any{
+			"elements": []map[string]any{
+				{
+					"text_run": map[string]any{
+						"content": content,
+					},
+				},
+			},
+		},
+	}
 }
 
 func makeTextBlock(content string) map[string]any {

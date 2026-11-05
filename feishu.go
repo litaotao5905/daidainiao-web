@@ -925,6 +925,14 @@ func (c *FeishuClient) DriveShareChat(ctx context.Context, token, chatID string)
 // DriveShareMember: POST drive/v1/permissions/:token/members?type=file with
 // member_type=openid so a specific user or bot can access the file.
 func (c *FeishuClient) DriveShareMember(ctx context.Context, token, memberType, memberID, perm string) (*DrivePermissionMember, error) {
+	return c.DriveShareMemberType(ctx, token, "file", memberType, memberID, perm)
+}
+
+// DriveShareMemberType grants a member access to a resource specifying docType ("file", "docx", "sheet", etc.).
+func (c *FeishuClient) DriveShareMemberType(ctx context.Context, token, docType, memberType, memberID, perm string) (*DrivePermissionMember, error) {
+	if docType == "" {
+		docType = "file"
+	}
 	if memberType == "" {
 		memberType = "openid"
 	}
@@ -947,7 +955,7 @@ func (c *FeishuClient) DriveShareMember(ctx context.Context, token, memberType, 
 		"type":        collabType,
 	})
 	q := url.Values{}
-	q.Set("type", "file")
+	q.Set("type", docType)
 	if memberType == "openchat" {
 		q.Set("need_notification", "false")
 	}
