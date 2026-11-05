@@ -2187,7 +2187,7 @@
       const statusText = $("encDocStatus");
       if (docLink) docLink.href = thread.doc_url || ("https://open.feishu.cn/docx/" + thread.doc_token);
       if (folderLink) folderLink.href = thread.folder_url || "#";
-      if (statusText) statusText.textContent = "密态云文档 1:1 绑定 (" + (thread.title || "已就绪") + ")";
+      if (statusText) statusText.textContent = "专属云文档 1:1 绑定 (" + (thread.title || "已就绪") + ")";
     } else {
       banner.hidden = true;
     }
@@ -2213,7 +2213,7 @@
           if (stillRunning && attempts < 40) {
             encPollTimer = setTimeout(poll, 2500);
           } else {
-            toast("🔒 加密轮次交互已落盘固化", false);
+            toast("📄 交互轮次已落盘固化", false);
           }
         }
       } catch (_) {

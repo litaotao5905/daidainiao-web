@@ -15,7 +15,7 @@ func TestTopSystemGuardrails(t *testing.T) {
 	if !strings.Contains(txt, "呆呆鸟系统最高安全准则") {
 		t.Fatalf("缺少顶级安全准则声明")
 	}
-	if !strings.Contains(txt, "仅在本文档输出") || !strings.Contains(txt, "严禁群内明文泄密") || !strings.Contains(txt, "防自动授权输出") {
+	if !strings.Contains(txt, "仅在本文档输出") || !strings.Contains(txt, "严禁群内明文泄密") || !strings.Contains(txt, "防自动授权") {
 		t.Fatalf("核心约束缺失")
 	}
 	if !strings.Contains(txt, "omt_test123") || !strings.Contains(txt, "张三") {
@@ -219,8 +219,8 @@ func TestEncryptedServiceMockFlow(t *testing.T) {
 	if !strings.Contains(foundNotify.Body.Content, "code_block") || !strings.Contains(foundNotify.Body.Content, thread.DocURL) {
 		t.Fatalf("通知消息必须包含 code_block 与文档链接，实际为: %s", foundNotify.Body.Content)
 	}
-	if strings.Contains(foundNotify.Body.Content, "【🔒 加密会话任务通知】") || strings.Contains(foundNotify.Body.Content, "未开放权限") {
-		t.Fatalf("严禁包含冗余或提示无权的解释性文本")
+	if strings.Contains(foundNotify.Body.Content, "【🔒 加密会话任务通知】") || strings.Contains(foundNotify.Body.Content, "未开放权限") || strings.Contains(foundNotify.Body.Content, "加密") {
+		t.Fatalf("严禁包含冗余或‘加密’等敏感解释性文本")
 	}
 
 	// 3. Get Thread View

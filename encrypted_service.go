@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const EncryptedDrivePrivateRootName = "网页呆呆鸟-加密版"
+const EncryptedDrivePrivateRootName = "网页呆呆鸟-工作文档"
 
 // EnsureEncryptedDoc ensures a 1:1 Feishu Docx document exists for the given thread.
 func (s *Service) EnsureEncryptedDoc(ctx context.Context, threadID, title string) (*EncryptedThread, error) {
@@ -69,9 +69,9 @@ func (s *Service) EnsureEncryptedDoc(ctx context.Context, threadID, title string
 		fURL, _ := client.FolderURL(ctx, fToken)
 
 		// 2. Create Docx
-		docx, err := client.CreateDocx(ctx, fToken, "🔒 加密会话 · "+title)
+		docx, err := client.CreateDocx(ctx, fToken, title+" · 协同文档")
 		if err != nil {
-			return nil, fmt.Errorf("创建加密会话文档失败：%w", err)
+			return nil, fmt.Errorf("创建协同文档失败：%w", err)
 		}
 		docURL, _ := client.DocxURL(ctx, docx.DocumentID)
 

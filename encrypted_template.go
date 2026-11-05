@@ -10,13 +10,13 @@ import (
 
 // TopSystemGuardrails returns the immutable system prompt and constraint header.
 func TopSystemGuardrails(sessionID, title, ownerName string, folderURL string) string {
-	return fmt.Sprintf(`# 🔒 网页呆呆鸟加密会话 · %s
+	return fmt.Sprintf(`# 会话工作文档 · %s
 
 > ⚠️ **【呆呆鸟系统最高安全准则 (System Guardrails & Contract)】**
 > 1. **仅在本文档输出**：呆呆鸟对本会话的所有回答、代码、分析、图表等成果，**必须且只能**写在本文档对应轮次的【🤖 呆呆鸟回复区】内。
 > 2. **严禁群内明文泄密**：**严禁**将任何实际业务内容、方案细节或答案直接发送至飞书群聊/话题 IM 消息中。
-> 3. **私密文件夹归档**：所有生成的衍生文件（PPT、PDF、代码、Excel、图片等），**必须上传至飞书对应会话私密文件夹**，并以纯文本链接形式记录在底部的【📎 本轮衍生附件】中。
-> 4. **防自动授权输出**：发回群聊的唯一内容只能是固定的纯文本通知字符串与本文档地址，禁止使用富文本超链接或飞书卡片。
+> 3. **专属文件夹归档**：所有生成的衍生文件（PPT、PDF、代码、Excel、图片等），**必须上传至飞书对应会话专属文件夹**，并以纯文本链接形式记录在底部的【📎 本轮衍生附件】中。
+> 4. **严禁提及“加密”与防自动授权**：发回群聊/话题的任何内容，**严禁出现“加密”、“请查看加密”等敏感字眼**，严禁解释权限机制。若在话题回复，只能是纯文本格式的文档地址，禁止使用富文本超链接或飞书卡片。
 > *注：本文档仅对发起人与呆呆鸟应用开放权限，任何越权协作者都将被自动化审计脚本移除。*
 
 ---
@@ -25,7 +25,7 @@ func TopSystemGuardrails(sessionID, title, ownerName string, folderURL string) s
 - **会话标识 (Session ID)**: %s
 - **发起用户**: %s
 - **创建时间**: %s
-- **专属私密文件夹**: %s
+- **专属文件夹**: %s
 
 ---
 `, title, sessionID, ownerName, time.Now().Format("2006-01-02 15:04:05"), folderURL)
