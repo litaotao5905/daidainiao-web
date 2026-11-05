@@ -1208,9 +1208,16 @@
     head.appendChild(tm);
     if (m.edited) head.appendChild(el("span", null, "已编辑"));
     if (m.pending) head.appendChild(el("span", "pendtag", "发送中…"));
+    if (m.is_frozen || (m.plain && m.plain.includes("加密会话任务通知"))) head.appendChild(el("span", "msg-frozen-tag", "🔒 已固化"));
     body.appendChild(head);
     const bubble = el("div", "bubble" + (m.card && !(m.paragraphs || []).length ? " cardbubble" : "") + ((m.forwarded || []).length ? " fwdbubble" : ""));
     renderBody(bubble, m, null);
+    if (m.artifacts && m.artifacts.length) {
+      const artBox = el("div", "msg-artifacts");
+      artBox.appendChild(el("div", "msg-artifacts-title", "📎 本轮衍生附件："));
+      for (const a of m.artifacts) artBox.appendChild(el("div", "msg-artifact-item", "• " + a));
+      bubble.appendChild(artBox);
+    }
     body.appendChild(bubble);
     row.appendChild(body);
     return row;
@@ -1815,10 +1822,21 @@
     const draftKey = threadId;
     input.value = ""; delete state.drafts[threadId]; saveDrafts(true); autosize(true);
     try {
-      const r = await api("/api/topics/" + encodeURIComponent(threadId) + "/reply", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, mentions, uuid, attachments: items.map((i) => i.uploadId), force: !!forceImmediate, encrypt }),
-      });
+      let r;
+      if (state.status && state.status.encrypted) {
+        const selLimit = $("contextLimitSelect") ? parseInt($("contextLimitSelect").value, 10) : 10;
+        r = await api("/api/encrypted/thread/" + encodeURIComponent(threadId) + "/reply", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: text, attachments: items.map((i) => i.name || i.uploadId), context_limit: selLimit }),
+        });
+        loadEncryptedDetails(threadId);
+        pollEncryptedSync(threadId);
+      } else {
+        r = await api("/api/topics/" + encodeURIComponent(threadId) + "/reply", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, mentions, uuid, attachments: items.map((i) => i.uploadId), force: !!forceImmediate, encrypt }),
+        });
+      }
       state.mentions.length = 0;
       replyTray.reset(false);
       markTopicRead(threadId, Date.now());
@@ -1910,6 +1928,23 @@
     if (e.altKey) { e.preventDefault(); sendReply(true); }
   });
   $("composer").addEventListener("submit", (e) => { e.preventDefault(); sendReply(false); });
+  if ($("contextLimitSelect")) {
+    $("contextLimitSelect").addEventListener("change", async (e) => {
+      const threadId = state.active;
+      if (!threadId) return;
+      const limit = parseInt(e.target.value, 10);
+      try {
+        await api("/api/encrypted/thread/" + encodeURIComponent(threadId) + "/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ context_limit: limit }),
+        });
+        toast("上下文策略已更新为：" + e.target.options[e.target.selectedIndex].text);
+      } catch (err) {
+        toast("更新上下文策略失败：" + err.message, true);
+      }
+    });
+  }
   $("btnMention").onclick = () => replyMention.toggle();
   document.addEventListener("mousedown", (e) => { if (!e.target.closest("#mentionPop, #btnMention")) replyMention.close(); });
 
@@ -2117,7 +2152,73 @@
     if (state.thread && state.thread.topic) markTopicRead(state.thread.topic.thread_id, state.thread.topic.last_time);
     setDownloads(state.thread.downloads);
     renderThread(); renderFiles();
+    if (state.status && state.status.encrypted) {
+      loadEncryptedDetails(id);
+    }
     scheduleDlPoll();
+  }
+
+  let encPollTimer = null;
+  async function loadEncryptedDetails(id) {
+    try {
+      const enc = await api("/api/encrypted/thread/" + encodeURIComponent(id));
+      if (state.active !== id) return;
+      if (enc && enc.thread) {
+        state.encThread = enc.thread;
+        state.encMessages = enc.messages || [];
+        updateEncryptedUI(enc.thread);
+      }
+    } catch (_) {}
+  }
+
+  function updateEncryptedUI(thread) {
+    const banner = $("encDocBanner");
+    const toolbar = $("composerEncToolbar");
+    if (!banner || !toolbar) return;
+    if (thread && thread.doc_token) {
+      banner.hidden = false;
+      toolbar.hidden = false;
+      const docLink = $("encDocLink");
+      const folderLink = $("encFolderLink");
+      const statusText = $("encDocStatus");
+      if (docLink) docLink.href = thread.doc_url || ("https://open.feishu.cn/docx/" + thread.doc_token);
+      if (folderLink) folderLink.href = thread.folder_url || "#";
+      if (statusText) statusText.textContent = "密态云文档 1:1 绑定 (" + (thread.title || "已就绪") + ")";
+      const sel = $("contextLimitSelect");
+      if (sel) sel.value = String(thread.context_limit ?? 10);
+    } else {
+      banner.hidden = true;
+    }
+  }
+
+  function pollEncryptedSync(threadId) {
+    if (encPollTimer) clearTimeout(encPollTimer);
+    let attempts = 0;
+    const poll = async () => {
+      if (state.active !== threadId) return;
+      attempts++;
+      try {
+        const res = await api("/api/encrypted/thread/" + encodeURIComponent(threadId) + "/sync", { method: "POST" });
+        if (state.active !== threadId) return;
+        if (res && res.messages) {
+          state.encMessages = res.messages;
+          if (res.thread) {
+            state.encThread = res.thread;
+            updateEncryptedUI(res.thread);
+          }
+          const stillRunning = res.messages.some((m) => m.status === "running");
+          await refreshOpenThread(state.viewGen);
+          if (stillRunning && attempts < 40) {
+            encPollTimer = setTimeout(poll, 2500);
+          } else {
+            toast("🔒 加密轮次交互已落盘固化", false);
+          }
+        }
+      } catch (_) {
+        if (attempts < 20) encPollTimer = setTimeout(poll, 3000);
+      }
+    };
+    encPollTimer = setTimeout(poll, 2000);
   }
 
   // Name tooltips appear synchronously, without the browser title delay.

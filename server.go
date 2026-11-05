@@ -98,6 +98,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/notifications/complete", s.handleNotifyComplete)
 	mux.HandleFunc("GET /api/read_state", s.handleGetReadState)
 	mux.HandleFunc("POST /api/read_state", s.handlePostReadState)
+	mux.HandleFunc("GET /api/encrypted/thread/{thread_id}", s.handleEncryptedThread)
+	mux.HandleFunc("POST /api/encrypted/thread/{thread_id}/reply", s.handleEncryptedReply)
+	mux.HandleFunc("POST /api/encrypted/thread/{thread_id}/settings", s.handleEncryptedSettings)
+	mux.HandleFunc("POST /api/encrypted/thread/{thread_id}/sync", s.handleEncryptedSync)
+	mux.HandleFunc("GET /api/encrypted/thread/{thread_id}/permissions", s.handleEncryptedPermissions)
 	if s.mock {
 		mux.HandleFunc("GET /api/mock/avatar", handleMockAvatar)
 	}
@@ -351,6 +356,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"configured":   s.mock || s.cfg.Configured(),
 		"logged_in":    s.svc.auth.LoggedIn(),
 		"version":      AppVersion,
+		"edition":      "encrypted",
+		"encrypted":    true,
+		"port":         8087,
 		"downloads":    s.svc.dl != nil,
 		"download_dir": dir,
 		"opener":       s.openerEnabled(),

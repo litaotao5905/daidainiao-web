@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>网页呆呆鸟</title>
+<title>网页呆呆鸟 · 加密版</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -17,7 +17,7 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><img class="logo-img" src="/favicon.svg" alt="" width="24" height="24"> 网页呆呆鸟</div>
+  <div class="brand"><img class="logo-img" src="/favicon.svg" alt="" width="24" height="24"> 网页呆呆鸟 <span class="badge enc-badge">🔒 加密版</span></div>
   <span id="modeBadge" class="badge" hidden>模拟模式</span>
   <div class="spacer"></div>
   <button id="btnNotify" class="btn icon" title="任务完成通知设置">🔔</button>
@@ -51,6 +51,14 @@
     <div id="chatHead" class="col-head chat-head" hidden>
       <div class="chat-title" id="chatTitle"></div>
       <div class="chat-sub" id="chatSub"></div>
+      <div id="encDocBanner" class="enc-doc-banner" hidden>
+        <div class="enc-doc-info"><span class="enc-shield">🛡️</span> <span id="encDocStatus">密态云文档已绑定</span></div>
+        <div class="enc-doc-links">
+          <a id="encDocLink" class="enc-doc-link" href="#" target="_blank" rel="noopener noreferrer">📄 专属云文档</a>
+          <a id="encFolderLink" class="enc-doc-link" href="#" target="_blank" rel="noopener noreferrer">📁 私密资料夹</a>
+          <span class="enc-audit-badge" title="文档链接分享已彻底关闭，仅对话者与呆呆鸟应用具有权限">🔒 0群聊协作者</span>
+        </div>
+      </div>
     </div>
     <div id="chatWarn"></div>
     <div id="messages" class="scroll">
@@ -61,6 +69,19 @@
       <div id="replyErr"></div>
       <div id="mentionPop" class="mention-pop" hidden></div>
       <div id="replyTray" class="tray"></div>
+      <div id="composerEncToolbar" class="composer-toolbar">
+        <span class="enc-toolbar-badge">🔒 加密文档交互</span>
+        <label class="context-limit-label">
+          上下文携带策略:
+          <select id="contextLimitSelect" class="context-limit-select">
+            <option value="10" selected>近 10 条 (推荐)</option>
+            <option value="20">近 20 条</option>
+            <option value="30">近 30 条</option>
+            <option value="0">全部历史</option>
+            <option value="-1">仅本轮 (极致隐私/无历史)</option>
+          </select>
+        </label>
+      </div>
       <div class="composer-row">
         <button id="btnMention" type="button" class="btn icon" title="@ 话题中的成员">@</button>
         <button id="btnAttach" type="button" class="btn icon" title="添加图片/文件（也可粘贴或拖拽到此处）">📎</button>

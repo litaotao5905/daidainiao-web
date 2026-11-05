@@ -18,12 +18,12 @@ WORKDIR /app
 
 COPY --from=builder /app/feishu-topics /app/feishu-topics
 
-EXPOSE 8088
+EXPOSE 8087
 
 VOLUME ["/app/data", "/downloads"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8088/api/status || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8087/api/status || exit 1
 
 ENTRYPOINT ["/app/feishu-topics"]
 CMD ["--config", "/app/config.json", "--data", "/app/data"]

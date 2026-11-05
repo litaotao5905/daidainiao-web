@@ -53,6 +53,7 @@ type Service struct {
 
 	notify *NotifyManager
 	readState *ReadStateManager
+	encryptedStore *EncryptedStore
 }
 
 // registerDownloads registers all downloadable files of the conversation and
@@ -70,6 +71,7 @@ func NewService(api API, cache *Cache, cfg Config, auth *Auth) *Service {
 	s := &Service{api: api, cache: cache, cfg: cfg, auth: auth, uMiss: map[string]time.Time{}, fwFail: map[string]fwFailure{}}
 	s.notify = newNotifyManager(s)
 	s.readState = newReadStateManager(cfg.DataDir)
+	s.encryptedStore = NewEncryptedStore(cfg.DataDir)
 	return s
 }
 
