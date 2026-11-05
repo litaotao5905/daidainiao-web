@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,7 +189,7 @@ func TestEncryptedServiceMockFlow(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Ensure Doc
-	thread, err := svc.EnsureEncryptedDoc(ctx, "omt_mock_enc", "商业化方案分析")
+	thread, err := svc.EnsureEncryptedDoc(ctx, "omt_mock_001", "商业化方案分析")
 	if err != nil {
 		t.Fatalf("EnsureEncryptedDoc 失败: %v", err)
 	}
@@ -197,7 +198,7 @@ func TestEncryptedServiceMockFlow(t *testing.T) {
 	}
 
 	// 2. Send Turn
-	botMsg, err := svc.SendEncryptedTurn(ctx, "omt_mock_enc", "请帮我制定第一阶段实施路线", nil, 10)
+	botMsg, err := svc.SendEncryptedTurn(ctx, "omt_mock_001", "请帮我制定第一阶段实施路线", nil, 10)
 	if err != nil {
 		t.Fatalf("SendEncryptedTurn 失败: %v", err)
 	}
@@ -205,12 +206,29 @@ func TestEncryptedServiceMockFlow(t *testing.T) {
 		t.Errorf("新轮次状态非预期: %+v", botMsg)
 	}
 
+	// Verify the notification message sent into the topic:
+	// MUST be plain text code_block without verbose prefix or explanatory text
+	sentUUID := fmt.Sprintf("enc_turn_omt_mock_001_1")
+	foundNotify, ok := api.sent[sentUUID]
+	if !ok || foundNotify == nil {
+		t.Fatalf("必须向话题发送通知，未在 api.sent 找到 uuid=%s", sentUUID)
+	}
+	if foundNotify.MsgType != "post" {
+		t.Fatalf("通知消息类型必须为 post，实际为: %s", foundNotify.MsgType)
+	}
+	if !strings.Contains(foundNotify.Body.Content, "code_block") || !strings.Contains(foundNotify.Body.Content, thread.DocURL) {
+		t.Fatalf("通知消息必须包含 code_block 与文档链接，实际为: %s", foundNotify.Body.Content)
+	}
+	if strings.Contains(foundNotify.Body.Content, "【🔒 加密会话任务通知】") || strings.Contains(foundNotify.Body.Content, "未开放权限") {
+		t.Fatalf("严禁包含冗余或提示无权的解释性文本")
+	}
+
 	// 3. Get Thread View
-	th, msgs, err := svc.GetEncryptedThread(ctx, "omt_mock_enc")
+	th, msgs, err := svc.GetEncryptedThread(ctx, "omt_mock_001")
 	if err != nil {
 		t.Fatalf("GetEncryptedThread 失败: %v", err)
 	}
-	if th.ThreadID != "omt_mock_enc" || len(msgs) != 2 {
+	if th.ThreadID != "omt_mock_001" || len(msgs) != 2 {
 		t.Errorf("Thread 消息列表非预期: len=%d", len(msgs))
 	}
 }

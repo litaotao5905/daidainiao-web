@@ -208,11 +208,22 @@ func (s *Service) SendEncryptedTurn(ctx context.Context, threadID, prompt string
 	}
 	_ = s.encryptedStore.AddMessage(botMsg)
 
-	// Send Plain Text Notification into Feishu IM Topic
-	// Notice: Must be plain text, never rich text or card, to prevent auto-granting permissions.
-	noticeText := fmt.Sprintf("【🔒 加密会话任务通知】\n本轮交互 (Turn %d) 已安全封装至专属私密云文档中，请对话者通过专属文档查看与交互。\n文档地址（请复制后访问）：\n%s\n（提示：群内成员未开放权限，访问将提示无权查看）", turnNumber, thread.DocURL)
+	// Send Plain Text Code Block Notification into Feishu IM Topic
+	// Notice: Must be a pure post message with tag=="code_block", never rich text, card, or plain URL,
+	// to prevent Feishu client from automatically generating preview cards and granting chat read access.
+	// No verbose prefix or explanation is sent, only the plain text code block containing the document URL.
+	postContent := map[string]any{
+		"zh_cn": map[string]any{
+			"title": "",
+			"content": [][]map[string]any{
+				{
+					{"tag": "code_block", "text": thread.DocURL},
+				},
+			},
+		},
+	}
 
-	contentJSON, _ := json.Marshal(map[string]string{"text": noticeText})
+	contentJSON, _ := json.Marshal(postContent)
 	rootID := threadID
 	if raws, err := s.threadMessagesForReply(ctx, threadID); err == nil && len(raws) > 0 {
 		if r := rootMessageID(raws); r != "" {
@@ -220,7 +231,7 @@ func (s *Service) SendEncryptedTurn(ctx context.Context, threadID, prompt string
 		}
 	}
 
-	_, _ = s.api.ReplyMessage(ctx, rootID, "text", string(contentJSON), fmt.Sprintf("enc_turn_%s_%d", threadID, turnNumber), true)
+	_, _ = s.api.ReplyMessage(ctx, rootID, "post", string(contentJSON), fmt.Sprintf("enc_turn_%s_%d", threadID, turnNumber), true)
 
 	return &botMsg, nil
 }
