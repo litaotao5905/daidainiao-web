@@ -1,26 +1,24 @@
 services:
-  feishu-topics:
+  feishu-topics-encrypted:
     build:
       context: .
       dockerfile: Dockerfile
-    image: feishu-topics:latest
-    container_name: feishu-topics
+    image: feishu-topics-encrypted:latest
+    container_name: feishu-topics-encrypted
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8088:8088"
+      - "127.0.0.1:8087:8087"
     environment:
       - TZ=Asia/Shanghai
-      - ADDR=0.0.0.0:8088
+      - ADDR=0.0.0.0:8087
       - ALLOW_ANY_HOST=1
-      # 下载文件在宿主机上的真实位置（用于界面里「复制文件路径」及宿主机打开服务）
-      - FEISHU_HOST_DOWNLOAD_DIR=${FEISHU_HOST_DOWNLOADS:-${HOME}/Documents/FeishuTopics}
+      # 下载文件在宿主机上的真实位置（加密版独立保存）
+      - FEISHU_HOST_DOWNLOAD_DIR=${FEISHU_HOST_DOWNLOADS:-${HOME}/Documents/FeishuTopics-Encrypted}
       - FEISHU_HOST_OPENER=http://host.docker.internal:18089
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
-      # 手动下载及导出的文件保存到这里。默认 ~/Documents/FeishuTopics；
-      # Windows（没有 HOME 变量）请在 .env 里设置 FEISHU_HOST_DOWNLOADS=C:/Users/你/Documents/FeishuTopics
-      - ${FEISHU_HOST_DOWNLOADS:-${HOME}/Documents/FeishuTopics}:/downloads
+      - ${FEISHU_HOST_DOWNLOADS:-${HOME}/Documents/FeishuTopics-Encrypted}:/downloads
     labels:
-      dev.orbstack.domains: feishu-topics.local
-      dev.orbstack.http-port: "8088"
+      dev.orbstack.domains: feishu-topics-encrypted.local
+      dev.orbstack.http-port: "8087"
