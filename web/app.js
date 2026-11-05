@@ -1231,6 +1231,222 @@
     }
     box.dataset.lastDay = lastDay;
   }
+
+  function botAvatarUrl() {
+    if (state.thread && state.thread.messages) {
+      const bm = state.thread.messages.find((m) => m.sender_type === "app" && m.sender_avatar);
+      if (bm) return bm.sender_avatar;
+    }
+    return "";
+  }
+
+  function cleanDocxAsterisks(text) {
+    if (!text) return "";
+    let trimmed = text.trim();
+    if (trimmed.startsWith("*") && trimmed.endsWith("*") && !trimmed.slice(1, -1).includes("*")) {
+      return trimmed.slice(1, -1).trim();
+    }
+    return trimmed;
+  }
+
+  function renderInlineFormatted(parent, rawText) {
+    if (!rawText) return;
+    const text = cleanDocxAsterisks(rawText);
+    const tokenRegex = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^\)]+\)|https?:\/\/[^\s]+)/g;
+    let lastIndex = 0;
+    let match;
+    while ((match = tokenRegex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        parent.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+      }
+      const token = match[0];
+      if (token.startsWith("**") && token.endsWith("**")) {
+        const b = el("b", null, token.slice(2, -2));
+        parent.appendChild(b);
+      } else if (token.startsWith("*") && token.endsWith("*") && token.length > 2) {
+        const emEl = el("em", null, token.slice(1, -1));
+        parent.appendChild(emEl);
+      } else if (token.startsWith("`") && token.endsWith("`")) {
+        const c = el("code", "ic", token.slice(1, -1));
+        parent.appendChild(c);
+      } else if (token.startsWith("[") && token.includes("](") && token.endsWith(")")) {
+        const p1 = token.indexOf("](");
+        const title = token.slice(1, p1);
+        const url = token.slice(p1 + 2, -1);
+        const a = el("a", "doc-link", title);
+        a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        parent.appendChild(a);
+      } else if (/^https?:\/\//i.test(token)) {
+        const a = el("a", "doc-link", token);
+        a.href = token; a.target = "_blank"; a.rel = "noopener noreferrer";
+        parent.appendChild(a);
+      }
+      lastIndex = match.index + token.length;
+    }
+    if (lastIndex < text.length) {
+      parent.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+  }
+
+  function renderEncryptedContent(bubble, content) {
+    if (!content) return;
+    const lines = content.split("\n");
+    let inCode = false;
+    let codeBuffer = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith("```")) {
+        if (inCode) {
+          const pre = el("pre", "code-block");
+          pre.textContent = codeBuffer.join("\n");
+          bubble.appendChild(pre);
+          codeBuffer = [];
+          inCode = false;
+        } else {
+          inCode = true;
+          codeBuffer = [];
+        }
+        continue;
+      }
+      if (inCode) {
+        codeBuffer.push(line);
+        continue;
+      }
+
+      const trimmed = line.trim();
+      if (!trimmed) {
+        bubble.appendChild(el("div", "blank-line"));
+        continue;
+      }
+
+      if (/^#{1,6}\s+/.test(trimmed)) {
+        const hText = trimmed.replace(/^#{1,6}\s+/, "");
+        const h = el("div", "rt-heading rt-h3");
+        renderInlineFormatted(h, hText);
+        bubble.appendChild(h);
+        continue;
+      }
+
+      if (trimmed.startsWith("> ")) {
+        const q = el("blockquote", "rt-quote");
+        renderInlineFormatted(q, trimmed.slice(2));
+        bubble.appendChild(q);
+        continue;
+      }
+
+      const ulMatch = /^[-*•]\s+(.*)/.exec(trimmed);
+      const olMatch = /^(\d+[.)、]|（\d+）|\d+）)\s*(.*)/.exec(trimmed);
+      if (ulMatch) {
+        const li = el("div", "rt-li ul lv-0");
+        li.appendChild(el("span", "rt-marker", "•"));
+        const lic = el("div", "rt-lic");
+        renderInlineFormatted(lic, ulMatch[1]);
+        li.appendChild(lic);
+        bubble.appendChild(li);
+        continue;
+      } else if (olMatch) {
+        const li = el("div", "rt-li ol lv-0");
+        li.appendChild(el("span", "rt-marker", olMatch[1]));
+        const lic = el("div", "rt-lic");
+        renderInlineFormatted(lic, olMatch[2]);
+        li.appendChild(lic);
+        bubble.appendChild(li);
+        continue;
+      }
+
+      const p = el("p", "msg-para");
+      renderInlineFormatted(p, trimmed);
+      bubble.appendChild(p);
+    }
+
+    if (inCode && codeBuffer.length) {
+      const pre = el("pre", "code-block");
+      pre.textContent = codeBuffer.join("\n");
+      bubble.appendChild(pre);
+    }
+  }
+
+  function renderEncryptedMessage(em) {
+    const isBot = em.role === "assistant";
+    const me = state.auth.user || {};
+    const senderName = isBot ? "呆呆鸟" : (me.name || "我");
+    const senderAvatar = isBot ? botAvatarUrl() : (me.avatar_url || "");
+    const timeMs = em.created_at ? new Date(em.created_at).getTime() : Date.now();
+
+    const row = el("div", "msg" + (em.turn_number === 1 && !isBot ? " root" : ""));
+    row.id = "enc-" + em.id;
+    row.appendChild(avatar(senderName, senderAvatar, false, isBot));
+
+    const body = el("div", "msg-body");
+    const head = el("div", "msg-head");
+    head.appendChild(el("span", "name", senderName));
+    if (isBot) head.appendChild(el("span", "tag", "BOT"));
+    head.appendChild(el("span", "tag" + (em.turn_number === 1 && !isBot ? " root" : ""), "Turn " + em.turn_number));
+
+    const tm = el("span", null, fmtTime(timeMs));
+    tm.title = fmtTime(timeMs, true);
+    head.appendChild(tm);
+
+    if (em.status === "running") {
+      head.appendChild(el("span", "tag qtag run", "🚀 正在文档中落盘…"));
+    } else if (em.is_frozen) {
+      head.appendChild(el("span", "msg-frozen-tag", "🔒 已固化"));
+    }
+    body.appendChild(head);
+
+    const bubble = el("div", "bubble" + (isBot ? " bot-bubble" : " user-bubble"));
+    if (isBot) {
+      if (em.status === "running") {
+        const runBox = el("div", "enc-running-box");
+        runBox.append(el("span", "spin-dot"), "呆呆鸟正在飞书专属文档中撰写回复，完成后将自动同步至此处…");
+        bubble.appendChild(runBox);
+      } else {
+        renderEncryptedContent(bubble, em.content);
+      }
+    } else {
+      const p = el("p", "msg-para");
+      renderInlineFormatted(p, em.content);
+      bubble.appendChild(p);
+
+      if (em.attachments && em.attachments.length) {
+        for (const att of em.attachments) {
+          bubble.appendChild(el("div", "lfile", "📎 " + att));
+        }
+      }
+    }
+
+    if (em.artifacts && em.artifacts.length) {
+      const artBox = el("div", "msg-artifacts");
+      artBox.appendChild(el("div", "msg-artifacts-title", "📎 本轮衍生附件："));
+      for (const a of em.artifacts) {
+        const item = el("div", "msg-artifact-item");
+        renderInlineFormatted(item, "• " + a);
+        artBox.appendChild(item);
+      }
+      bubble.appendChild(artBox);
+    }
+
+    body.appendChild(bubble);
+    row.appendChild(body);
+    return row;
+  }
+
+  function appendEncryptedMessages(box, encMsgs) {
+    let lastDay = box.dataset.lastDay || "";
+    for (const em of encMsgs) {
+      const timeMs = em.created_at ? new Date(em.created_at).getTime() : Date.now();
+      const d = new Date(timeMs).toDateString();
+      if (d !== lastDay) {
+        lastDay = d;
+        const s = el("div", "day");
+        s.appendChild(el("span", null, dayLabel(timeMs)));
+        box.appendChild(s);
+      }
+      box.appendChild(renderEncryptedMessage(em));
+    }
+    box.dataset.lastDay = lastDay;
+  }
   function renderQueuedMessage(qItem, idx, t) {
     const me = state.auth.user || {};
     const row = el("div", "msg queued-msg");
@@ -1389,13 +1605,25 @@
     $("chatTitle").textContent = t.topic.title;
     $("chatTitle").title = t.topic.title;
     const qCount = (t.queue || []).length;
-    $("chatSub").textContent = t.topic.chat_name + " · " + t.messages.length + " 条消息" + (qCount ? " · " + qCount + " 条排队中" : "") + " · 发起人 " + t.topic.sender_name;
+    if (state.status && state.status.encrypted && state.encMessages && state.encMessages.length > 0) {
+      const turnCount = Math.ceil(state.encMessages.length / 2);
+      $("chatSub").textContent = t.topic.chat_name + " · " + turnCount + " 轮对话" + (qCount ? " · " + qCount + " 条排队中" : "") + " · 发起人 " + t.topic.sender_name;
+    } else {
+      $("chatSub").textContent = t.topic.chat_name + " · " + t.messages.length + " 条消息" + (qCount ? " · " + qCount + " 条排队中" : "") + " · 发起人 " + t.topic.sender_name;
+    }
     renderGroupButton();
     (t.warnings || []).forEach((w) => $("chatWarn").appendChild(banner("warn", w)));
     failNotice();
     if (t.topic.pending) $("chatWarn").appendChild(el("div", "pendnote", "这是你刚发出的一条消息：在飞书里它还不是话题，发送第一条回复后才会创建话题。"));
-    appendMessages(box, t.messages);
+    if (state.status && state.status.encrypted && state.encMessages && state.encMessages.length > 0) {
+      appendEncryptedMessages(box, state.encMessages);
+    } else {
+      appendMessages(box, t.messages);
+    }
     appendQueuedMessages(box, t.queue, t);
+    if (state.status && state.status.encrypted && state.encThread) {
+      updateEncryptedUI(state.encThread);
+    }
     if (scroll === "keep") {
       stickToBottomUntil = 0;
       box.scrollTop = keepTop || 0;
@@ -1829,7 +2057,24 @@
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: text, attachments: items.map((i) => i.name || i.uploadId), context_limit: selLimit }),
         });
-        loadEncryptedDetails(threadId);
+        if (pendRow && pendRow.isConnected) pendRow.remove();
+        if (r && r.message) {
+          const nextTurn = r.message.turn_number || (Math.floor((state.encMessages || []).length / 2) + 1);
+          state.encMessages = state.encMessages || [];
+          state.encMessages.push({
+            id: "msg_" + threadId + "_turn" + nextTurn + "_user",
+            thread_id: threadId,
+            turn_number: nextTurn,
+            role: "user",
+            content: text,
+            attachments: items.map((i) => i.name || i.uploadId),
+            is_frozen: true,
+            status: "done",
+            created_at: new Date().toISOString(),
+          });
+          state.encMessages.push(r.message);
+          renderThread("bottom");
+        }
         pollEncryptedSync(threadId);
       } else {
         r = await api("/api/topics/" + encodeURIComponent(threadId) + "/reply", {
@@ -2131,9 +2376,20 @@
     renderList();
     $("messages").textContent = ""; $("messages").appendChild(el("div", "loading", "加载对话中…"));
     try {
-      const thread = await api("/api/topics/" + encodeURIComponent(id) + "/messages" + (refresh ? "?refresh=1" : ""));
+      const fetchThread = api("/api/topics/" + encodeURIComponent(id) + "/messages" + (refresh ? "?refresh=1" : ""));
+      const fetchEnc = (state.status && state.status.encrypted)
+        ? api("/api/encrypted/thread/" + encodeURIComponent(id)).catch(() => null)
+        : Promise.resolve(null);
+      const [thread, enc] = await Promise.all([fetchThread, fetchEnc]);
       if (state.active !== id || state.viewGen !== generation) return;
       state.thread = thread;
+      if (enc && enc.thread) {
+        state.encThread = enc.thread;
+        state.encMessages = enc.messages || [];
+      } else {
+        state.encThread = null;
+        state.encMessages = [];
+      }
     } catch (e) {
       if (state.active !== id || state.viewGen !== generation) return;
       state.thread = null;
@@ -2153,7 +2409,9 @@
     setDownloads(state.thread.downloads);
     renderThread(); renderFiles();
     if (state.status && state.status.encrypted) {
-      loadEncryptedDetails(id);
+      if (state.encMessages.some((m) => m.status === "running")) {
+        pollEncryptedSync(id);
+      }
     }
     scheduleDlPoll();
   }
@@ -2167,6 +2425,7 @@
         state.encThread = enc.thread;
         state.encMessages = enc.messages || [];
         updateEncryptedUI(enc.thread);
+        renderThread("keep");
       }
     } catch (_) {}
   }
@@ -2200,7 +2459,11 @@
       if (state.active !== threadId) return;
       attempts++;
       try {
-        const res = await api("/api/encrypted/thread/" + encodeURIComponent(threadId) + "/sync", { method: "POST" });
+        const res = await api("/api/encrypted/thread/" + encodeURIComponent(threadId) + "/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
         if (state.active !== threadId) return;
         if (res && res.messages) {
           state.encMessages = res.messages;
@@ -2209,7 +2472,7 @@
             updateEncryptedUI(res.thread);
           }
           const stillRunning = res.messages.some((m) => m.status === "running");
-          await refreshOpenThread(state.viewGen);
+          renderThread("keep");
           if (stillRunning && attempts < 40) {
             encPollTimer = setTimeout(poll, 2500);
           } else {
@@ -2779,6 +3042,9 @@
     }
     if (prevBusy && !nextBusy) {
       onTaskFinished(t, id);
+      if (state.status && state.status.encrypted) {
+        pollEncryptedSync(id);
+      }
     }
     setDownloads(t.downloads);
     syncTopicFromThread(t);

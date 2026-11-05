@@ -314,3 +314,36 @@ func TestLiveEncryptedDoc(t *testing.T) {
 	}
 	t.Logf("Created/Ensured encrypted doc: doc_token=%s url=%s folder=%s", thread.DocToken, thread.DocURL, thread.FolderURL)
 }
+
+func TestLiveDocxRawContent(t *testing.T) {
+	configPath := os.Getenv("DAIDAINIAO_LIVE_CONFIG")
+	if configPath == "" {
+		t.Skip("skipping live test without DAIDAINIAO_LIVE_CONFIG")
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Normalize()
+	dataDir := cfg.DataDir
+	if v := os.Getenv("DAIDAINIAO_LIVE_DATA"); v != "" {
+		dataDir = v
+	}
+	cfg.DataDir = dataDir
+	auth := NewAuth(cfg, false, filepath.Join(cfg.DataDir, "token.json"))
+	client := NewFeishuClient(cfg.BaseURL, cfg.AppID, cfg.AppSecret, auth, "auto")
+
+	ctx := context.Background()
+	raw, err := client.GetDocxRawContent(ctx, "GxV1d9tb4oQeiwxHhNpc0xsvn5b")
+	if err != nil {
+		t.Fatalf("GetDocxRawContent failed: %v", err)
+	}
+	t.Logf("RAW CONTENT LENGTH: %d", len(raw))
+	t.Logf("RAW CONTENT:\n%s", raw)
+
+	parsed := ParseEncryptedDocContent(raw)
+	t.Logf("PARSED TURNS COUNT: %d", len(parsed))
+	for _, p := range parsed {
+		t.Logf("Parsed turn %d: completed=%v, prompt=%q, reply=%q", p.TurnNumber, p.IsCompleted, p.UserPrompt, p.BotReply)
+	}
+}

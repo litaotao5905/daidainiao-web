@@ -570,3 +570,38 @@ a.cbtn:hover { border-color: var(--accent); text-decoration: none; }
   font-size: 13px;
   margin: 2px 0;
 }
+
+.enc-running-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent);
+  font-size: 13px;
+  padding: 4px 0;
+}
+.enc-running-box .spin-dot {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+.msg-para {
+  margin: 4px 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.blank-line {
+  height: 8px;
+}
+.code-block {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-family: monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

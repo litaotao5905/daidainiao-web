@@ -143,7 +143,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 				}
 			}
 			rawUpload := r.URL.Path == "/api/upload" && strings.HasPrefix(r.Header.Get("Content-Type"), "application/octet-stream")
-			if !rawUpload && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			if !rawUpload && r.ContentLength > 0 && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 				http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
 				return
 			}

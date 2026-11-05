@@ -41,7 +41,7 @@ func FormatTurnBlock(turnNumber int, prompt string, attachments []string, histor
 	sb.WriteString(fmt.Sprintf("- **提交时间**: %s\n", time.Now().Format("2006-01-02 15:04:05")))
 	sb.WriteString("- **指令内容**:\n```text\n")
 	sb.WriteString(strings.TrimSpace(prompt))
-	sb.WriteString("\n```\n\n")
+	sb.WriteString("\n\n严格遵守文档最前面的要求。\n```\n\n")
 
 	if len(attachments) > 0 {
 		sb.WriteString("- **附带参考资料**:\n")
@@ -71,10 +71,10 @@ type EncryptedTurn struct {
 }
 
 var (
-	turnHeaderRe = regexp.MustCompile(`(?m)^##\s+.*?Turn\s*(\d+)`)
-	userPromptRe = regexp.MustCompile(`(?s)###+ .*?用户指令.*?(?:` + "```" + `(?:text)?\s*(.*?)\s*` + "```" + `|- 指令内容[:：]\s*(.*?)(?:\n###|\z))`)
-	botReplyRe   = regexp.MustCompile(`(?s)###+ .*?呆呆鸟回复区.*?\n(.*?)(?:\n###+ .*?本轮衍生附件|\n---|\z)`)
-	artifactsRe  = regexp.MustCompile(`(?s)###+ .*?本轮衍生附件.*?\n(.*?)(?:\n---|\z)`)
+	turnHeaderRe = regexp.MustCompile(`(?m)^(?:#{1,6}\s+)?.*?当前交互轮次\s*[·•\-:]?\s*Turn\s*(\d+)`)
+	userPromptRe = regexp.MustCompile(`(?s)(?:#{1,6}\s+)?.*?用户指令.*?(?:` + "```" + `(?:text)?\s*(.*?)\s*` + "```" + `|- 指令内容[:：]\s*(.*?)(?:\n(?:#{1,6}\s+)?.*?(?:呆呆鸟回复区|本轮衍生附件)|\z))`)
+	botReplyRe   = regexp.MustCompile(`(?s)(?:#{1,6}\s+)?.*?呆呆鸟回复区.*?\n(.*?)(?:\n(?:#{1,6}\s+)?.*?本轮衍生附件|\n---|\n(?:#{1,6}\s+)?.*?当前交互轮次|\z)`)
+	artifactsRe  = regexp.MustCompile(`(?s)(?:#{1,6}\s+)?.*?本轮衍生附件.*?\n(.*?)(?:\n---|\n(?:#{1,6}\s+)?.*?当前交互轮次|\z)`)
 )
 
 // ParseEncryptedDocContent parses raw document text into structured turns.
@@ -104,6 +104,8 @@ func ParseEncryptedDocContent(raw string) []EncryptedTurn {
 			if p == "" && len(uMatch) > 2 {
 				p = uMatch[2]
 			}
+			p = strings.TrimSpace(p)
+			p = strings.TrimSuffix(p, "严格遵守文档最前面的要求。")
 			t.UserPrompt = strings.TrimSpace(p)
 		}
 
