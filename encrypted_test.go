@@ -11,15 +11,15 @@ import (
 )
 
 func TestTopSystemGuardrails(t *testing.T) {
-	txt := TopSystemGuardrails("omt_test123", "测试话题", "张三", "https://example.feishu.cn/fld")
+	txt := TopSystemGuardrails("测试话题", "https://example.feishu.cn/docx/123")
 	if !strings.Contains(txt, "呆呆鸟系统最高安全准则") {
 		t.Fatalf("缺少顶级安全准则声明")
 	}
-	if !strings.Contains(txt, "仅在本文档输出") || !strings.Contains(txt, "严禁群内明文泄密") || !strings.Contains(txt, "防自动授权") {
-		t.Fatalf("核心约束缺失")
+	if !strings.Contains(txt, "全成果文档落盘") || !strings.Contains(txt, "群聊严格闭嘴禁言") || !strings.Contains(txt, "Plain Text 代码块") {
+		t.Fatalf("核心约束缺失: %s", txt)
 	}
-	if !strings.Contains(txt, "omt_test123") || !strings.Contains(txt, "张三") {
-		t.Fatalf("缺少会话元数据或所有者信息")
+	if strings.Contains(txt, "加密") {
+		t.Fatalf("准则中严禁出现加密字眼")
 	}
 }
 
@@ -38,7 +38,7 @@ func TestFormatAndParseEncryptedDocContent(t *testing.T) {
 	history := "#### Turn 1 [已固化]\n- 用户: 帮我分析营收\n- 呆呆鸟: 营收1.2亿\n\n"
 	turn2 := FormatTurnBlock(2, "生成对应的 PPT 汇报", nil, history)
 
-	fullDoc := TopSystemGuardrails("omt_123", "测试", "张三", "https://example.feishu.cn/fld") + "\n" + turn1Completed + "\n" + turn2
+	fullDoc := TopSystemGuardrails("测试", "https://example.feishu.cn/docx/fld") + "\n" + turn1Completed + "\n" + turn2
 
 	// 3. Parse doc
 	parsed := ParseEncryptedDocContent(fullDoc)

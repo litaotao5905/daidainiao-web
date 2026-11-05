@@ -95,6 +95,50 @@ func (c *FeishuClient) AppendDocxChildren(ctx context.Context, docToken, parentB
 	return nil
 }
 
+// GetDocxChildren retrieves direct child blocks of a parent block in a Docx document.
+func (c *FeishuClient) GetDocxChildren(ctx context.Context, docToken, parentBlockID string) ([]map[string]any, error) {
+	if parentBlockID == "" {
+		parentBlockID = docToken
+	}
+	q := url.Values{"page_size": {"500"}}
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	path := fmt.Sprintf("/docx/v1/documents/%s/blocks/%s/children", url.PathEscape(docToken), url.PathEscape(parentBlockID))
+	if err := c.call(ctx, idUser, path, q, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
+// ClearDocxChildren deletes all child blocks under the document root block.
+func (c *FeishuClient) ClearDocxChildren(ctx context.Context, docToken string) error {
+	items, err := c.GetDocxChildren(ctx, docToken, docToken)
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	payload := map[string]any{
+		"start_index": 0,
+		"end_index":   len(items),
+	}
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/docx/v1/documents/%s/blocks/%s/children/batch_delete", url.PathEscape(docToken), url.PathEscape(docToken))
+	return c.callReq(ctx, idUser, http.MethodDelete, path, nil, reqBody, true, nil)
+}
+
+// RewriteDocxContent clears existing root children and writes new blocks,
+// guaranteeing that only the selected context is present in the document.
+func (c *FeishuClient) RewriteDocxContent(ctx context.Context, docToken string, blocks []map[string]any) error {
+	_ = c.ClearDocxChildren(ctx, docToken)
+	return c.AppendDocxChildren(ctx, docToken, "", blocks, -1)
+}
+
 // DocxURL returns the full web URL for a Docx document.
 func (c *FeishuClient) DocxURL(ctx context.Context, token string) (string, error) {
 	body, _ := json.Marshal(map[string]any{

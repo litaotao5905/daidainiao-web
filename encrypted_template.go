@@ -8,27 +8,21 @@ import (
 	"time"
 )
 
-// TopSystemGuardrails returns the immutable system prompt and constraint header.
-func TopSystemGuardrails(sessionID, title, ownerName string, folderURL string) string {
-	return fmt.Sprintf(`# 会话工作文档 · %s
+// TopSystemGuardrails returns the token-saving, strict silent contract header.
+func TopSystemGuardrails(title, docURL string) string {
+	return fmt.Sprintf(`# 协同工作台 · %s
 
-> ⚠️ **【呆呆鸟系统最高安全准则 (System Guardrails & Contract)】**
-> 1. **仅在本文档输出**：呆呆鸟对本会话的所有回答、代码、分析、图表等成果，**必须且只能**写在本文档对应轮次的【🤖 呆呆鸟回复区】内。
-> 2. **严禁群内明文泄密**：**严禁**将任何实际业务内容、方案细节或答案直接发送至飞书群聊/话题 IM 消息中。
-> 3. **专属文件夹归档**：所有生成的衍生文件（PPT、PDF、代码、Excel、图片等），**必须上传至飞书对应会话专属文件夹**，并以纯文本链接形式记录在底部的【📎 本轮衍生附件】中。
-> 4. **严禁提及“加密”与防自动授权**：发回群聊/话题的任何内容，**严禁出现“加密”、“请查看加密”等敏感字眼**，严禁解释权限机制。若在话题回复，只能是纯文本格式的文档地址，禁止使用富文本超链接或飞书卡片。
-> *注：本文档仅对发起人与呆呆鸟应用开放权限，任何越权协作者都将被自动化审计脚本移除。*
-
----
-
-### 📋 会话信息与审计
-- **会话标识 (Session ID)**: %s
-- **发起用户**: %s
-- **创建时间**: %s
-- **专属文件夹**: %s
+> 🛑 **【呆呆鸟系统最高安全准则 (Zero-Leak Output Contract)】**
+> 1. **全成果文档落盘**：你的所有分析、方案、代码与业务回答，**必须且只能**写在本文档本轮的【🤖 呆呆鸟回复区】内。
+> 2. **群聊严格闭嘴禁言**：**严禁在飞书话题/群聊中发送任何业务分析、回复、说明或进度！** 严禁提及任何敏感安全字眼！
+> 3. **群聊唯一允许的回复格式（Plain Text 代码块）**：若飞书机制要求你在话题回复，你的**全部回复内容必须且只能**是一行纯文本代码块（三反引号包裹的文档地址），禁止包含任何文字说明，禁止发送裸链接：
+> `+"```"+`
+> %s
+> `+"```"+`
+> *(除上述代码块地址外，群内严禁包含任何中文汉字或解释！)*
 
 ---
-`, title, sessionID, ownerName, time.Now().Format("2006-01-02 15:04:05"), folderURL)
+`, title, docURL)
 }
 
 // FormatTurnBlock formats a specific turn for appending to the document.

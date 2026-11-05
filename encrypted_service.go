@@ -31,10 +31,6 @@ func (s *Service) EnsureEncryptedDoc(ctx context.Context, threadID, title string
 	}
 
 	ownerID := s.auth.UserID()
-	ownerName := "当前用户"
-	if st := s.auth.Status(); st.User != nil && st.User.Name != "" {
-		ownerName = st.User.Name
-	}
 
 	if title == "" {
 		if raws, err := s.threadMessagesForReply(ctx, threadID); err == nil && len(raws) > 0 {
@@ -86,7 +82,7 @@ func (s *Service) EnsureEncryptedDoc(ctx context.Context, threadID, title string
 		}
 
 		// 5. Append Top Guardrails
-		topMarkdown := TopSystemGuardrails(threadID, title, ownerName, fURL)
+		topMarkdown := TopSystemGuardrails(title, docURL)
 		blocks := BuildDocxTextBlocks(topMarkdown)
 		if err := client.AppendDocxChildren(ctx, docx.DocumentID, "", blocks, -1); err != nil {
 			return nil, fmt.Errorf("写入会话初始安全准则失败：%w", err)
@@ -168,12 +164,14 @@ func (s *Service) SendEncryptedTurn(ctx context.Context, threadID, prompt string
 	}
 
 	turnMarkdown := FormatTurnBlock(turnNumber, prompt, attachments, historySnippet)
+	topMarkdown := TopSystemGuardrails(thread.Title, thread.DocURL)
+	fullMarkdown := topMarkdown + "\n\n" + turnMarkdown
 
-	// Append to Docx if real Feishu client
+	// Rewrite Docx if real Feishu client: clears old children so doc strictly contains only selected context
 	client, isReal := s.api.(*FeishuClient)
 	if isReal {
-		blocks := BuildDocxTextBlocks(turnMarkdown)
-		if err := client.AppendDocxChildren(ctx, thread.DocToken, "", blocks, -1); err != nil {
+		blocks := BuildDocxTextBlocks(fullMarkdown)
+		if err := client.RewriteDocxContent(ctx, thread.DocToken, blocks); err != nil {
 			return nil, fmt.Errorf("向飞书文档写入新轮次失败：%w", err)
 		}
 	}
