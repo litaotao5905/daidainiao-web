@@ -244,8 +244,9 @@ var (
 	mdListRe     = regexp.MustCompile(`^(\s*)(?:[-*+]|•)\s+(.*)$`)
 	mdOrdListRe  = regexp.MustCompile(`^(\s*)(\d+[.)])\s+(.*)$`)
 	mdQuoteRe    = regexp.MustCompile(`^>\s?(.*)$`)
-	mdTableSepRe = regexp.MustCompile(`^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$`)
-	mdBrTagRe    = regexp.MustCompile(`(?i)<br\s*/?>`)
+	mdTableSepRe        = regexp.MustCompile(`^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$`)
+	mdBrTagRe           = regexp.MustCompile(`(?i)<br\s*/?>`)
+	mdCodeFenceInlineRe = regexp.MustCompile("([^\n`])(```[a-zA-Z0-9_+-]*)")
 )
 
 func listIndentLevel(ws string) int {
@@ -300,6 +301,7 @@ func isMDTableRow(ln string) bool {
 // mdParas converts lark_md / markdown into paragraphs of nodes.
 func (b *builder) mdParas(s string) [][]Node {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = mdCodeFenceInlineRe.ReplaceAllString(s, "$1\n$2")
 	lines := strings.Split(s, "\n")
 	var out [][]Node
 	for i := 0; i < len(lines); i++ {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -284,5 +285,46 @@ func TestRichMarkdownTableAndLists(t *testing.T) {
 	cp := ParseContent("post", postJS, nil)
 	if len(cp.Attachments) != 1 || cp.Attachments[0].URL != "https://u0vocx8xrmg.feishu.cn/file/ZGc3bLTpyoTtdExjNeTcyki2nXb" {
 		t.Fatalf("doc link tail not cleaned: %+v", cp.Attachments)
+	}
+}
+
+func TestInlineCodeFenceDoesNotSwallowSubsequentContent(t *testing.T) {
+	rawContent := "比如 1990-03-15 出生的员工：```plain_text\n30-34岁  2020-03-15 ~ 2025-03-14\n35-39岁  2025-03-15 ~ 2030-03-14\n```\n\n五年才一条记录。\n\n**四类标签的留存方式**\n- **事件驱动**：发生变动才变。"
+	payload, _ := json.Marshal(map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []any{
+				map[string]any{
+					"tag":     "markdown",
+					"content": rawContent,
+				},
+			},
+		},
+	})
+	c := ParseContent("interactive", string(payload), nil)
+	if c.Card == nil || len(c.Card.Blocks) == 0 {
+		t.Fatalf("card not parsed: %+v", c)
+	}
+	paras := c.Card.Blocks[0].Paras
+	var sawCode bool
+	var sawListAfterCode bool
+	for _, p := range paras {
+		if len(p) == 0 {
+			continue
+		}
+		if p[0].Type == "code" {
+			sawCode = true
+			if strings.Contains(p[0].Text, "四类标签的留存方式") {
+				t.Fatalf("code block erroneously swallowed subsequent content: %q", p[0].Text)
+			}
+		}
+		for _, node := range p {
+			if node.Block == "ul" || strings.Contains(node.Text, "事件驱动") {
+				sawListAfterCode = true
+			}
+		}
+	}
+	if !sawCode || !sawListAfterCode {
+		t.Fatalf("expected code block and list after code block, sawCode=%v, sawList=%v, paras=%+v", sawCode, sawListAfterCode, paras)
 	}
 }
