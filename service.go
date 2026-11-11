@@ -634,13 +634,21 @@ func (s *Service) resolveUsers(ctx context.Context, ids []string, hints map[stri
 			s.uMu.Lock()
 			if err != nil {
 				var fe *FeishuError
-				msg := "无法获取用户姓名/头像（可能缺少 contact:user.base:readonly 权限或用户不在应用可见范围），已使用 @ 提及中的名称或 ID 代替"
-				if errors.As(err, &fe) && fe.Msg != "" {
-					msg += "：" + truncate(fe.Msg, 100)
+				isCrossApp := errors.As(err, &fe) && (strings.Contains(fe.Msg, "cross app") || fe.Code == 1063001)
+				if isCrossApp {
+					// 列表中混入了机器人/应用 open_id，静默记录 miss，不进行全局熔断与页面警告
+					for _, id := range toFetch {
+						s.uMiss[id] = time.Now()
+					}
+				} else {
+					msg := "无法获取用户姓名/头像（可能缺少 contact:user.base:readonly 权限或用户不在应用可见范围），已使用 @ 提及中的名称或 ID 代替"
+					if errors.As(err, &fe) && fe.Msg != "" {
+						msg += "：" + truncate(fe.Msg, 100)
+					}
+					s.uFailTill = time.Now().Add(userFailTL)
+					s.uFailMsg = msg
+					warns = append(warns, msg)
 				}
-				s.uFailTill = time.Now().Add(userFailTL)
-				s.uFailMsg = msg
-				warns = append(warns, msg)
 			} else {
 				for _, id := range toFetch {
 					if !got[id] {
@@ -674,6 +682,10 @@ func senderIDs(raws []RawMessage) ([]string, map[string]string) {
 	var ids []string
 	hints := map[string]string{}
 	for _, m := range raws {
+		// 机器人/应用不是通讯录中的自然人用户，不加入待查询的用户列表
+		if m.Sender.SenderType == "app" {
+			continue
+		}
 		if m.Sender.IDType == "open_id" || (m.Sender.IDType == "" && strings.HasPrefix(m.Sender.ID, "ou_")) {
 			ids = append(ids, m.Sender.ID)
 		}
