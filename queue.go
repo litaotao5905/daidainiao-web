@@ -280,7 +280,7 @@ func (s *Service) topicBusyState(chatName string, msgs []Message, lastSentMs int
 			return true, "💭 呆呆鸟正在思考与进展中…"
 		case strings.HasPrefix(p, "🧵 后台任务") && !strings.Contains(p, "已全部结束"):
 			return true, firstLine(p, 80)
-		case strings.HasPrefix(p, "🤖 正在思考") || strings.HasPrefix(p, "⚡ 已中断，正在处理新指令") || strings.Contains(p, "正在继续处理…"):
+		case strings.HasPrefix(p, "🤖 正在思考") || strings.Contains(p, "正在继续处理…"):
 			return true, firstLine(p, 80)
 		case strings.HasPrefix(p, "🤖 Claude Code 会话已启动"):
 			return true, "🤖 Claude Code 会话已启动，正在处理…"
