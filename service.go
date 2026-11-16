@@ -632,9 +632,9 @@ func (s *Service) resolveUsers(ctx context.Context, ids []string, hints map[stri
 			s.uMu.Lock()
 			if err != nil {
 				var fe *FeishuError
-				isCrossApp := errors.As(err, &fe) && (strings.Contains(fe.Msg, "cross app") || fe.Code == 1063001)
+				isCrossApp := errors.As(err, &fe) && (strings.Contains(fe.Msg, "cross app") || fe.Code == 1063001 || strings.Contains(fe.Msg, "not a valid {open_id}") || fe.Code == 99992351)
 				if isCrossApp {
-					// 列表中混入了机器人/应用 open_id，静默记录 miss，不进行全局熔断与页面警告
+					// 列表中混入了机器人/应用或格式无效/已截断的 open_id，静默记录 miss，不进行全局熔断与页面警告
 					for _, id := range toFetch {
 						s.uMiss[id] = time.Now()
 					}

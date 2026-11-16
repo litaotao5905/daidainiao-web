@@ -797,7 +797,7 @@ func (b *builder) userName(id string) string {
 	return b.opts.UserName(id)
 }
 
-var openIDRe = regexp.MustCompile(`ou_[A-Za-z0-9_]+`)
+var openIDRe = regexp.MustCompile(`ou_(?:[0-9a-fA-F]{32}|mock_[A-Za-z0-9_]+)\b`)
 
 // cardUserIDs lists open_ids referenced inside card JSON (<at id=…>, person
 // components) so their names can be resolved like message senders.

@@ -328,3 +328,13 @@ func TestInlineCodeFenceDoesNotSwallowSubsequentContent(t *testing.T) {
 		t.Fatalf("expected code block and list after code block, sawCode=%v, sawList=%v, paras=%+v", sawCode, sawListAfterCode, paras)
 	}
 }
+
+func TestCardUserIDsFiltersTruncatedOpenIDs(t *testing.T) {
+	validOpenID := "ou_5d2578d8d3d1d041ccd65a24b24343f8"
+	mockOpenID := "ou_mock_zhangwei"
+	content := `{"body":{"elements":[{"tag":"markdown","content":"账号是 ou_bf22…、ou_da5******* 以及过长前缀 ou_5d2578d8d3d1d041ccd65a24b24343f8abc；真实用户 <at id=` + validOpenID + `></at> 和 ` + mockOpenID + `。"}]}}`
+	got := cardUserIDs(content)
+	if len(got) != 2 || got[0] != validOpenID || got[1] != mockOpenID {
+		t.Fatalf("cardUserIDs = %v, want [%s %s]", got, validOpenID, mockOpenID)
+	}
+}
