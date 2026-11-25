@@ -3704,7 +3704,10 @@
     setWorkspaceTab(modal, tabs[next]);
     $(workspaceTabs[tabs[next]].button).focus();
   };
-  $("workspaceSearch").oninput = () => state.workspaceModal && refreshWorkspaceSearch(state.workspaceModal, false);
+  $("workspaceSearch").oninput = (e) => {
+    const modal = state.workspaceModal;
+    if (modal && !e.isComposing) refreshWorkspaceSearch(modal, false);
+  };
   $("workspaceSearchForm").onsubmit = (e) => {
     e.preventDefault();
     if (!e.isComposing && state.workspaceModal) refreshWorkspaceSearch(state.workspaceModal, true);

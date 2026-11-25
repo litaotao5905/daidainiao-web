@@ -206,12 +206,6 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	next := ChatWorkspace{AttachContext: req.AttachContext, Items: []WorkspaceItem{}}
 	used := make(map[string]bool, len(req.Items))
-	bindings := make(map[[3]string]bool, len(req.Items))
-	for _, item := range req.Items {
-		if old := previous[item.ID]; old.ID != "" {
-			bindings[workspaceBindingKey(old)] = true
-		}
-	}
 	ctx := workspaceContext(r, uid)
 	for _, item := range req.Items {
 		old := previous[item.ID]
@@ -225,8 +219,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		newBinding := item.ID == ""
-		if newBinding {
+		if item.ID == "" {
 			item.ID = newCSRFToken()
 		}
 		if !keyRe.MatchString(item.ID) || used[item.ID] {
@@ -239,11 +232,6 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeWorkspaceErr(w, err)
 			return
 		}
-		key := workspaceBindingKey(item)
-		if newBinding && bindings[key] {
-			continue
-		}
-		bindings[key] = true
 		next.Items = append(next.Items, item)
 	}
 	for id, item := range previous {
@@ -255,6 +243,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ErrLoginRequired)
 		return
 	}
+	next.Items = workspaceDeduplicateBindings(next.Items, previous)
 	if err := s.svc.saveWorkspace(uid, req.ChatID, next); err != nil {
 		writeWorkspaceErr(w, err)
 		return
@@ -265,6 +254,25 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, next)
+}
+
+func workspaceDeduplicateBindings(items []WorkspaceItem, previous map[string]WorkspaceItem) []WorkspaceItem {
+	bindings := make(map[[3]string]bool, len(items))
+	for _, item := range items {
+		if previous[item.ID].ID != "" {
+			bindings[workspaceBindingKey(item)] = true
+		}
+	}
+	out := items[:0]
+	for _, item := range items {
+		key := workspaceBindingKey(item)
+		if previous[item.ID].ID == "" && bindings[key] {
+			continue
+		}
+		out = append(out, item)
+		bindings[key] = true
+	}
+	return out
 }
 
 func workspaceBindingKey(item WorkspaceItem) [3]string {
@@ -734,7 +742,9 @@ func (s *Service) workspaceSearchDrive(ctx context.Context, query string) (works
 		if i == 0 {
 			folders, folderErr = s.workspaceSearchDriveFolders(ctx, query)
 		} else {
-			docs, docsErr = s.workspaceSearchDriveDocs(ctx, query)
+			docCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+			defer cancel()
+			docs, docsErr = s.workspaceSearchDriveDocs(docCtx, query)
 		}
 	})
 	result := workspaceCloudMatches{Items: append(append([]workspaceCloudMatch{}, folders...), docs...)}
