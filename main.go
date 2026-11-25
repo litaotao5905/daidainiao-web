@@ -42,7 +42,11 @@ func main() {
 	if *hostOpener != "" {
 		dir := *hostOpenerDir
 		if dir == "" {
-			dir = filepath.Join(os.Getenv("HOME"), "Documents", "FeishuTopics")
+			home := os.Getenv("HOME")
+			dir = strings.Join([]string{
+				filepath.Join(home, "Documents", "FeishuTopics"),
+				home,
+			}, ",")
 		}
 		log.Fatal(ServeHostOpener(*hostOpener, dir))
 	}

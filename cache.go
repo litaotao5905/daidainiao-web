@@ -46,7 +46,12 @@ func (c *Cache) Get(key string, out any) (time.Duration, bool) {
 		if err == nil && json.Unmarshal(b, &e) == nil && e.Key == key {
 			ok = true
 			c.mu.Lock()
-			c.mem[key] = e
+			// A concurrent Set may have published a newer value during the disk read.
+			if current, exists := c.mem[key]; exists {
+				e = current
+			} else {
+				c.mem[key] = e
+			}
 			c.mu.Unlock()
 		}
 	}

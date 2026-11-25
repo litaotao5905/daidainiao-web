@@ -189,6 +189,31 @@ func (c *FeishuClient) VerifyUploadParents(ctx context.Context, topic string) er
 	return err
 }
 
+func (c *FeishuClient) DriveEnsurePrivateSubfolder(ctx context.Context, subName string) (string, error) {
+	if subName == "" || strings.ContainsAny(subName, "/\\") || subName == "." || subName == ".." {
+		return "", fmt.Errorf("私密子目录名称无效")
+	}
+	folder, _, err := c.ensurePrivateTopicFolder(ctx, subName)
+	if err != nil {
+		return "", err
+	}
+	// Recheck cached folder tokens before putting preview or staging data in them.
+	base, _, err := c.ensurePrivateTopicFolder(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	for _, token := range []string{base, folder} {
+		permissions, err := c.DrivePermissions(ctx, token, "folder")
+		if err != nil {
+			return "", err
+		}
+		if err := verifyPrivateFolder(permissions, c.auth.UserID()); err != nil {
+			return "", err
+		}
+	}
+	return folder, nil
+}
+
 // Folder settings are read through v2; public-setting PATCH does not document
 // folder support. A newly created folder must already be private or we stop.
 func verifyPrivateFolder(p *DrivePermissionSnapshot, owner string) error {

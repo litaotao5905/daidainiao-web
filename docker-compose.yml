@@ -14,6 +14,8 @@ services:
       - ALLOW_ANY_HOST=1
       # 下载文件在宿主机上的真实位置（用于界面里「复制文件路径」及宿主机打开服务）
       - FEISHU_HOST_DOWNLOAD_DIR=${FEISHU_HOST_DOWNLOADS:-${HOME}/Documents/FeishuTopics}
+      - FEISHU_HOST_HOME=${HOME}
+      - FEISHU_CONTAINER_HOME=/host-home
       - FEISHU_HOST_OPENER=http://host.docker.internal:18089
     volumes:
       - ./config.json:/app/config.json:ro
@@ -21,6 +23,7 @@ services:
       # 手动下载及导出的文件保存到这里。默认 ~/Documents/FeishuTopics；
       # Windows（没有 HOME 变量）请在 .env 里设置 FEISHU_HOST_DOWNLOADS=C:/Users/你/Documents/FeishuTopics
       - ${FEISHU_HOST_DOWNLOADS:-${HOME}/Documents/FeishuTopics}:/downloads
+      - ${HOME}:/host-home
     labels:
       dev.orbstack.domains: feishu-topics.local
       dev.orbstack.http-port: "8088"

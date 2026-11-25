@@ -21,6 +21,8 @@
     "im:message",
     "im:message.send_as_user",
     "im:resource",
+    "drive:drive",
+    "wiki:wiki",
     "drive:file:upload",
     "drive:file:download",
     "drive:drive.metadata:readonly",

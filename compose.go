@@ -41,9 +41,10 @@ var (
 	// ErrTooLarge: attachment over the limit.
 	ErrTooLarge = errors.New("附件过大")
 
-	stageIDRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
-	urlRe     = regexp.MustCompile(`https?://[^\s<>"'，。；！？、）】》]+`)
-	imageExts = map[string]bool{"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true, "bmp": true, "ico": true, "tif": true, "tiff": true, "heic": true}
+	stageIDRe        = regexp.MustCompile(`^[a-f0-9]{32}$`)
+	urlRe            = regexp.MustCompile(`https?://[^\s<>"'，。；！？、）】》]+`)
+	composeDocLinkRe = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
+	imageExts        = map[string]bool{"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true, "bmp": true, "ico": true, "tif": true, "tiff": true, "heic": true}
 )
 
 // ---------- staging (browser -> local disk) ----------
@@ -445,6 +446,10 @@ func postRows(text string, ms []ReplyMention) [][]map[string]any {
 			if loc := urlRe.FindStringIndex(rest); loc != nil && (idx < 0 || loc[0] < idx) {
 				idx, kind, ml = loc[0], "url", loc[1]-loc[0]
 			}
+			link := composeDocLinkRe.FindStringSubmatchIndex(rest)
+			if link != nil && (idx < 0 || link[0] < idx) && isDocURL(rest[link[4]:link[5]]) {
+				idx, kind, ml = link[0], "doc_link", link[1]-link[0]
+			}
 			if idx < 0 {
 				row = append(row, map[string]any{"tag": "text", "text": rest})
 				break
@@ -455,7 +460,7 @@ func postRows(text string, ms []ReplyMention) [][]map[string]any {
 			seg := rest[idx : idx+ml]
 			if kind == "at" {
 				row = append(row, map[string]any{"tag": "at", "user_id": valid[mi].ID, "user_name": valid[mi].Name})
-			} else if isDocURL(seg) {
+			} else if kind == "doc_link" || isDocURL(seg) {
 				if len(row) > 0 {
 					rows = append(rows, row)
 					row = nil

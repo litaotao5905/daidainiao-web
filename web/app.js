@@ -2,19 +2,21 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const state = {
-    status: null, auth: { logged_in: false }, chats: [], selection: [], loadedSelection: false,
-    byChat: {}, errors: {}, warnings: new Set(), loading: new Set(),
+    status: null, startupError: null, auth: { logged_in: false }, chats: [], selection: [], loadedSelection: false,
+    byChat: {}, errors: {}, topicWarnings: new Map(), loading: new Set(),
     topics: [], active: null, thread: null, preview: null, search: "",
     listTab: localStorage.getItem("feishu_list_tab") || "my",
     myTopics: [], myLoading: false, myLoaded: false, myError: null,
     failed: new Set(), drafts: {}, mentions: [], sending: false, composerThread: null,
     viewGen: 0,
-    tab: "files", dlSig: "", dlMap: new Map(),
+    tab: "files", workspaces: new Map(), workspaceModal: null, workspaceDrag: null, dlSig: "", dlMap: new Map(),
     dl: { items: [], dir: "", opener: false, docker: false, enabled: true },
     notify: { feishu_enabled: true, browser_enabled: true, sound_enabled: true },
     readState: { initialized: false, threads: {} },
     csrf: "",
   };
+  let startingTopics = true;
+  let readStateReady = false;
   try { state.drafts = JSON.parse(sessionStorage.getItem("drafts") || "{}"); } catch (_) { state.drafts = {}; }
 
   // ---------- helpers ----------
@@ -107,14 +109,14 @@
   const dlDisplayName = (i) => i && i.cloud_name ? i.cloud_name : i && i.name && !/^https?:\/\//i.test(i.name) ? i.name : (i && (i.name_hint || i.name)) || "（未下载）";
   const isPendingDl = (i) => i.status === "waiting" || i.status === "downloading";
 
-  function toast(msg, isErr) {
+  function toast(msg, isErr, persistent = false) {
     let t = document.getElementById("toast");
     if (t) t.remove();
     t = el("div", "toast" + (isErr ? " err" : ""), msg);
     t.id = "toast"; t.setAttribute("role", "status");
     document.body.appendChild(t);
     clearTimeout(toast.t);
-    toast.t = setTimeout(() => t.remove(), isErr ? 5000 : 2200);
+    if (!persistent) toast.t = setTimeout(() => t.remove(), isErr ? 5000 : 2200);
   }
   async function csrfToken(fresh) {
     if (!state.csrf || fresh) state.csrf = (await api("/api/csrf")).token;
@@ -366,18 +368,19 @@
     return true;
   }
   function renderTabs() {
-    const done = state.dl.items.filter((i) => i.status === "done").length;
-    const pend = state.dl.items.some(isPendingDl);
     const fileCount = state.dl.items.filter((i) => !isOnlineDl(i)).length;
     $("dlCount").textContent = fileCount ? String(fileCount) : "";
     const docCount = ((state.thread && state.thread.attachments) || []).filter(isOnlineAtt).length;
     $("filesCount").textContent = docCount ? String(docCount) : "";
+    $("tabWorkspace").classList.toggle("on", state.tab === "workspace");
+    $("tabWorkspace").setAttribute("aria-selected", state.tab === "workspace");
     $("tabFiles").classList.toggle("on", state.tab === "files");
     $("tabDl").classList.toggle("on", state.tab === "dl");
     $("tabFiles").setAttribute("aria-selected", state.tab === "files");
     $("tabDl").setAttribute("aria-selected", state.tab === "dl");
-    $("filesTabs").hidden = !!state.preview;
-    $("filesTitle").hidden = !state.preview;
+    const showPreviewTitle = !!state.preview && !state.workspaceDrag;
+    $("filesTabs").hidden = showPreviewTitle;
+    $("filesTitle").hidden = !showPreviewTitle;
   }
   function setTab(tab) {
     state.tab = tab; state.preview = null;
@@ -507,19 +510,9 @@
     if (done && dlPreviewable(i)) {
       items.push({ label: "右侧内联预览", run: () => openPreview(dlAsAtt(i)) });
     }
-    items.push("-", { label: "重新下载", disabled: isPendingDl(i), run: () => retryDl(i) });
+    items.push("-", { label: done ? "重新下载到本地" : "下载到本地", disabled: isPendingDl(i), run: () => retryDl(i) });
     return items;
   }
-  function withFileMenu(node, getItem) {
-    node.addEventListener("contextmenu", (ev) => {
-      const i = getItem();
-      if (!i) return;
-      ev.preventDefault(); ev.stopPropagation();
-      showMenu(ev.clientX, ev.clientY, fileMenu(i));
-    });
-    return node;
-  }
-
   // ---------- theme ----------
   function applyTheme(t) {
     document.documentElement.dataset.theme = t; localStorage.setItem("theme", t);
@@ -574,7 +567,10 @@
   function onLoggedOut() {
     if (!state.auth.logged_in) return;
     state.auth = { logged_in: false };
+    state.workspaces.clear(); closeWorkspaceModal(); endWorkspaceDrag();
     state.thread = null; state.active = null; state.preview = null; state.topics = []; state.byChat = {}; state.composerThread = null;
+    state.chats = []; state.myTopics = []; state.myLoaded = false; state.myLoading = false; state.myError = null;
+    state.errors = {}; state.loading.clear(); state.topicWarnings.clear();
     stopAutoRefresh();
     clearTimeout(dlTimer); closeMenu(); state.dl = { items: [], dir: "", opener: false, docker: false, enabled: true }; state.dlMap = new Map(); state.dlSig = ""; state.csrf = "";
     replyTray.reset(true); ntTray.reset(true); $("ntModal").hidden = true; $("btnMarkAllRead").hidden = true;
@@ -643,12 +639,9 @@
       renderThread();
       renderFiles();
     }
-    if (tab === "my" && !state.myLoaded && state.auth.logged_in) {
-      loadMyTopics(false);
-    } else {
-      renderList();
-      refreshTopicListSilently();
-    }
+    renderList();
+    const cachedFirst = tab === "my" ? !state.myLoaded : state.selection.some((id) => !state.byChat[id]);
+    refreshTopicListSilently({ cachedFirst });
   }
   function renderGroupButton() {
     if (state.listTab === "my") {
@@ -681,13 +674,13 @@
     state.topics = all;
   }
   function checkInitReadState() {
-    if (!state.readState || state.readState.initialized) return;
+    if (!readStateReady || startingTopics || state.readState.initialized || !state.auth.logged_in) return false;
     const all = [...state.myTopics, ...state.topics];
-    if (!all.length) return;
-    const threads = {};
+    if (!all.length) return false;
+    const threads = { ...state.readState.threads };
     for (const t of all) {
       if (t.thread_id) {
-        threads[t.thread_id] = t.last_time || t.create_time || Date.now();
+        threads[t.thread_id] = Math.max(threads[t.thread_id] || 0, t.last_time || t.create_time || Date.now());
       }
     }
     state.readState.initialized = true;
@@ -697,6 +690,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initialized: true, threads: threads })
     }).catch(() => {});
+    return true;
   }
   function markTopicRead(id, timeMs) {
     if (!id || !state.readState || !state.readState.threads) return;
@@ -705,12 +699,15 @@
     const ms = Math.max(timeMs || 0, (t && t.last_time) || 0, Date.now());
     if (ms > cur) {
       state.readState.threads[id] = ms;
-      api("/api/read_state", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ thread_id: id, read_time: ms })
-      }).catch(() => {});
+      if (!startingTopics || (readStateReady && state.readState.initialized)) saveTopicRead(id, ms);
     }
+  }
+  function saveTopicRead(id, time) {
+    api("/api/read_state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: id, read_time: time })
+    }).catch(() => {});
   }
   function renderTopicRow(list, t, showChatBadge) {
     const row = el("div", "topic" + (state.active === t.thread_id ? " active" : ""));
@@ -763,6 +760,7 @@
     if (grpCountEl) grpCountEl.textContent = state.topics.length ? String(state.topics.length) : "";
     const canReply = state.auth.logged_in && state.auth.reply_enabled !== false;
     $("btnNewTopic").hidden = !canReply;
+    if (state.startupError) bn.appendChild(banner("err", "无法连接后端：" + state.startupError.message));
     if (state.status && !state.status.configured) {
       bn.appendChild(banner("err", "尚未配置飞书凭证", "请配置 config.json 或环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET，或使用 --mock 运行（详见 README）。"));
     }
@@ -774,7 +772,9 @@
     } else if (state.myError) {
       bn.appendChild(banner("err", "拉取我的会话失败：" + state.myError.message, state.myError.hint, state.myError));
     }
-    for (const w of state.warnings) bn.appendChild(banner("warn", w));
+    const listKeys = state.listTab === "my" ? [null] : state.selection;
+    const warnings = new Set(listKeys.flatMap((key) => state.topicWarnings.get(key) || []));
+    for (const w of warnings) bn.appendChild(banner("warn", w));
     if (state.status && state.status.configured && !state.auth.logged_in) {
       if (state.loadedSelection) loginPrompt(list);
       return;
@@ -798,7 +798,7 @@
         }
         list.appendChild(e); return;
       }
-      if (state.loading.size) list.appendChild(el("div", "loading", "正在加载 " + state.loading.size + " 个群聊的话题…"));
+      if (state.loading.size && !state.topics.length) list.appendChild(el("div", "loading", "正在加载 " + state.loading.size + " 个群聊的话题…"));
       const items = state.topics.filter((t) => !q || (t.title + " " + t.sender_name + " " + t.chat_name + " " + (t.snippet || "")).toLowerCase().includes(q));
       if (!items.length && !state.loading.size) {
         list.appendChild(el("div", "empty", q ? "没有匹配的话题" : "所选群聊中暂无话题（话题 = 带回复的消息串）"));
@@ -814,49 +814,102 @@
     renderList();
     list.scrollTop = top;
   }
-  async function loadMyTopics(refresh) {
-    if (!state.auth.logged_in) return;
-    state.myLoading = true; state.myError = null;
-    renderList();
-    $("btnRefresh").classList.add("spin");
-    try {
-      const r = await api("/api/topics/my" + (refresh ? "?refresh=1" : ""));
-      state.myTopics = r.topics || [];
-      state.myLoaded = true;
-      (r.warnings || []).forEach((w) => state.warnings.add(w));
-    } catch (e) {
-      state.myError = e;
-    } finally {
-      state.myLoading = false;
-      $("btnRefresh").classList.remove("spin");
-      checkInitReadState();
-      renderList();
-    }
+  const topicLoads = new Map();
+  function updateRefreshIndicator() {
+    $("btnRefresh").classList.toggle("spin", topicLoads.size > 0 || chatsRequest !== null);
   }
-  async function loadTopics(refresh) {
-    state.errors = {}; state.warnings = new Set(); state.byChat = refresh ? {} : state.byChat;
-    const ids = state.selection.slice();
-    for (const k of Object.keys(state.byChat)) if (!ids.includes(k)) delete state.byChat[k];
-    ids.forEach((id) => state.loading.add(id));
-    rebuildTopics(); renderList();
-    $("btnRefresh").classList.add("spin");
-    try {
-      await Promise.all(ids.map(async (id) => {
-        try {
-          const r = await api("/api/topics?chat_id=" + encodeURIComponent(id) + (refresh ? "&refresh=1" : ""));
-          if (!state.auth.logged_in) return;
-          state.byChat[id] = r.topics || [];
-          (r.warnings || []).forEach((w) => state.warnings.add(w));
-        } catch (e) { state.errors[id] = e; }
-        state.loading.delete(id);
-        rebuildTopics(); renderList();
-      }));
-    } finally {
-      $("btnRefresh").classList.remove("spin");
-      checkInitReadState();
-      renderList();
+  function loadTopicList(chatID, refresh, { cachedFirst = false, silent = false } = {}) {
+    const auth = state.auth;
+    if (!auth.logged_in) return;
+    const pending = topicLoads.get(chatID);
+    if (pending) {
+      if (refresh && !pending.refresh) {
+        return pending.promise.then(() => loadTopicList(chatID, true, { silent }));
+      }
+      return pending.promise;
     }
-    if (state.active && !state.topics.some((t) => t.thread_id === state.active) && !state.myTopics.some((t) => t.thread_id === state.active) && !state.thread) state.active = null;
+
+    const mine = chatID === null;
+    const path = mine ? "/api/topics/my" : "/api/topics?chat_id=" + encodeURIComponent(chatID);
+    const url = (flag) => path + (mine ? "?" : "&") + flag + "=1";
+    const current = () => state.auth === auth && (mine || state.selection.includes(chatID));
+    const loaded = () => mine ? state.myLoaded || state.myTopics.length > 0 : !!state.byChat[chatID];
+    const setLoading = (on) => {
+      const wasLoading = mine ? state.myLoading : state.loading.has(chatID);
+      if (mine) state.myLoading = on;
+      else if (on) state.loading.add(chatID);
+      else state.loading.delete(chatID);
+      return wasLoading !== on;
+    };
+    const apply = (r, live) => {
+      if (!current()) return;
+      const topics = r.topics || [];
+      const warnings = r.warnings || [];
+      const changed = !sameTopics(mine ? state.myTopics : state.byChat[chatID], topics);
+      const hadError = mine ? !!state.myError : !!state.errors[chatID];
+      if (mine) {
+        state.myLoaded = true;
+        state.myError = null;
+        if (changed) state.myTopics = topics;
+      } else {
+        delete state.errors[chatID];
+        if (changed) {
+          state.byChat[chatID] = topics;
+          rebuildTopics();
+        }
+      }
+      const warningsChanged = (state.topicWarnings.get(chatID) || []).join("\n") !== warnings.join("\n");
+      state.topicWarnings.set(chatID, warnings);
+      if (live && changed && state.active && document.hasFocus()) markTopicRead(state.active);
+      const loadingChanged = setLoading(false);
+      if (changed || hadError || warningsChanged || loadingChanged) renderListKeepScroll();
+    };
+    const promise = Promise.resolve().then(async () => {
+      if (!current()) return;
+      if (setLoading(!loaded())) renderListKeepScroll();
+      if (cachedFirst && !loaded()) {
+        try {
+          const r = await api(url("cached"));
+          if (r.from_cache === true && !loaded()) apply(r, false);
+        } catch (_) { /* the live request below can still succeed */ }
+      }
+      if (!current()) return;
+      lastTopicPoll = Date.now();
+      try {
+        apply(await api(refresh ? url("refresh") : path), true);
+      } catch (e) {
+        if (current() && (!silent || !loaded())) {
+          if (mine) state.myError = e;
+          else state.errors[chatID] = e;
+          renderListKeepScroll();
+        }
+      }
+    }).finally(() => {
+      topicLoads.delete(chatID);
+      lastTopicPoll = Date.now();
+      updateRefreshIndicator();
+      const loadingChanged = setLoading(false);
+      if (state.auth === auth && loadingChanged) renderListKeepScroll();
+    });
+    topicLoads.set(chatID, { refresh, promise });
+    updateRefreshIndicator();
+    return promise;
+  }
+  async function loadMyTopics(refresh, options) {
+    await loadTopicList(null, refresh, options);
+    if (checkInitReadState()) renderListKeepScroll();
+  }
+  async function loadTopics(refresh, options) {
+    const ids = state.selection.slice();
+    const removed = Object.keys(state.byChat).filter((id) => !ids.includes(id));
+    for (const id of removed) {
+      delete state.byChat[id];
+      delete state.errors[id];
+      state.topicWarnings.delete(id);
+    }
+    if (removed.length) { rebuildTopics(); renderListKeepScroll(); }
+    await Promise.all(ids.map((id) => loadTopicList(id, refresh, options)));
+    if (checkInitReadState()) renderListKeepScroll();
   }
 
   // ---------- chat ----------
@@ -921,39 +974,50 @@
           const href = safeHref(n.href);
           if (!href) { parent.appendChild(el("span", null, n.text)); break; }
           const a = el("a", n.is_doc ? "doc" : "", n.text);
-          a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+          a.href = workspaceNavigationURL(href); a.target = "_blank"; a.rel = "noopener noreferrer";
           styleClasses(a, n.style, true);
+          const attachment = workspaceLinkAttachment(href, n.text, msg.id);
+          withWorkspaceResource(a, workspaceAttachmentSource(attachment), () => dlOf(attachment), attachment);
           parent.appendChild(a); break;
         }
         case "at": { const s = el("span", "mention", n.text); styleClasses(s, n.style, true); parent.appendChild(s); break; }
         case "emoji": parent.appendChild(el("span", null, n.text)); break;
         case "image": {
           const key = failKey(msg.id, n.key);
-          const it0 = dlItem(msg.id, n.key);
-          if (n.no_dl || fwd || state.failed.has(key) || (it0 && it0.status === "failed")) { parent.appendChild(failChip("图片", n.no_dl || fwd, it0)); break; }
-          if (!it0 || it0.status !== "done") {
-            const c = el("div", "chip"); c.appendChild(el("span", "nm", "🖼️ 图片"));
+          const it = dlItem(msg.id, n.key);
+          const attachment = workspaceBubbleAttachment(msg.id, n.key, "image", "图片", "image");
+          const placeholder = () => {
+            const c = failChip("图片", n.no_dl || fwd, it);
+            if (!n.no_dl && !fwd) wireWorkspaceBubble(c, attachment, c.firstChild);
+            return c;
+          };
+          if (n.no_dl || fwd || state.failed.has(key) || (it && it.status === "failed")) { parent.appendChild(placeholder()); break; }
+          if (!it || it.status !== "done") {
+            const c = el("div", "chip");
+            c.appendChild(el("span", "nm", "🖼️ 图片"));
             const st = el("span", "dlst"); st.dataset.dlk = msg.id + "|" + n.key; c.appendChild(st);
-            c.onclick = () => openPreviewFor(msg.id, n.key, "image", "图片", "image");
+            wireWorkspaceBubble(c, attachment);
             parent.appendChild(c); queueMicrotask(updateDlBadges); break;
           }
           const img = el("img", "inline");
           img.loading = "lazy"; img.alt = "图片";
           img.src = resUrlRaw(msg.id, n.key, "image");
           img.onload = () => { const b = $("messages"); if (b && shouldStickToBottom(b)) b.scrollTop = b.scrollHeight; };
-          img.onerror = () => { img.replaceWith(failChip("图片", false, dlItem(msg.id, n.key))); markFailed(key); };
-          img.onclick = () => openPreviewFor(msg.id, n.key, "image", "图片", "image");
-          withFileMenu(img, () => dlItem(msg.id, n.key));
+          img.onerror = () => { img.replaceWith(placeholder()); markFailed(key); };
+          wireWorkspaceBubble(img, attachment);
           parent.appendChild(img); break;
         }
         case "media": {
-          const itv = dlItem(msg.id, n.key);
-          if (n.no_dl || fwd || state.failed.has(failKey(msg.id, n.key)) || (itv && itv.status === "failed")) { parent.appendChild(failChip(n.text || "视频", n.no_dl || fwd, itv)); break; }
+          const it = dlItem(msg.id, n.key);
+          const attachment = workspaceBubbleAttachment(msg.id, n.key, "file", n.text || "视频", "video", n.cover);
+          if (n.no_dl || fwd || state.failed.has(failKey(msg.id, n.key)) || (it && it.status === "failed")) {
+            const c = failChip(n.text || "视频", n.no_dl || fwd, it);
+            if (!n.no_dl && !fwd) wireWorkspaceBubble(c, attachment, c.firstChild);
+            parent.appendChild(c); break;
+          }
           const c = el("div", "video-card");
-
           c.append(el("div", "play", "▶"), el("div", "cap", n.text || "视频"));
-          c.onclick = () => openPreviewFor(msg.id, n.key, "file", n.text || "视频", "video", n.cover);
-          withFileMenu(c, () => dlItem(msg.id, n.key));
+          wireWorkspaceBubble(c, attachment);
           parent.appendChild(c); break;
         }
         case "file": {
@@ -964,18 +1028,8 @@
             c.classList.add("nodl"); c.title = NODL_TIP;
             c.append(el("span", "dlst st-err", "⚠ 卡片/转发内，飞书不支持下载"));
           } else {
-            c.title = "点击用默认应用打开 · 右键在文件夹中显示或更多操作";
-            c.onclick = () => {
-              const it = dlItem(msg.id, n.key);
-              if (it && it.status === "done" && state.dl.opener) {
-                state.preview = null; state.tab = "dl"; renderFiles();
-                openLocal(it);
-                return;
-              }
-              openPreviewFor(msg.id, n.key, "file", n.text, kind);
-            };
+            wireWorkspaceBubble(c, workspaceBubbleAttachment(msg.id, n.key, "file", n.text, kind));
             const st = el("span", "dlst"); st.dataset.dlk = msg.id + "|" + n.key; c.appendChild(st);
-            withFileMenu(c, () => dlItem(msg.id, n.key));
             queueMicrotask(updateDlBadges);
           }
           parent.appendChild(c); break;
@@ -1091,8 +1145,11 @@
         for (const bt of b.buttons || []) {
           const href = safeHref(bt.url);
           const x = href ? el("a", "cbtn " + (bt.kind || ""), bt.text) : el("span", "cbtn disabled " + (bt.kind || ""), bt.text);
-          if (href) { x.href = href; x.target = "_blank"; x.rel = "noopener noreferrer"; }
-          else x.title = "该按钮需要在飞书中操作";
+          if (href) {
+            x.href = workspaceNavigationURL(href); x.target = "_blank"; x.rel = "noopener noreferrer";
+            const attachment = workspaceLinkAttachment(href, bt.text, m.id);
+            withWorkspaceResource(x, workspaceAttachmentSource(attachment), () => dlOf(attachment), attachment);
+          } else x.title = "该按钮需要在飞书中操作";
           d.appendChild(x);
         }
         parent.appendChild(d); break;
@@ -1379,6 +1436,7 @@
       box.appendChild(e); return;
     }
     $("chatHead").hidden = false;
+    updateWorkspaceHeader();
     $("chatTitle").textContent = t.topic.title;
     $("chatTitle").title = t.topic.title;
     const qCount = (t.queue || []).length;
@@ -1510,7 +1568,7 @@
       render();
     };
     tray.reset = (deleteStaged) => { for (const it of tray.items.slice()) { if (deleteStaged) tray.remove(it); } if (!deleteStaged) { for (const it of tray.items) if (it.url) URL.revokeObjectURL(it.url); tray.items = []; } tray.note = null; render(); };
-    tray.restoreStaged = (atts) => {
+    tray.restoreStaged = (atts, note = "已从排队撤回") => {
       for (const a of atts || []) {
         if (!a || !a.upload_id || tray.items.some((x) => x.uploadId === a.upload_id)) continue;
         tray.items.push({
@@ -1520,7 +1578,7 @@
           status: "ready",
           progress: 1,
           url: null,
-          note: "已从排队撤回",
+          note,
           uploadId: a.upload_id,
         });
       }
@@ -1668,6 +1726,7 @@
     const i = $("replyInput");
     if (state.composerThread !== t.topic.thread_id) {
       state.composerThread = t.topic.thread_id;
+      workspaceAttachmentDefault("replyWorkspace", t.topic.chat_id, workspaceModel(t.topic.chat_id), true);
       i.value = state.drafts[t.topic.thread_id] || "";
       state.mentions.length = 0; setReplyErr(null); replyMention.close();
       replyTray.reset(true);
@@ -1713,10 +1772,7 @@
   }
   async function reloadChat(chatId) {
     if (chatId && state.selection.includes(chatId)) {
-      try {
-        const r = await api("/api/topics?chat_id=" + encodeURIComponent(chatId));
-        state.byChat[chatId] = r.topics || []; rebuildTopics(); renderList();
-      } catch (_) { /* ignore */ }
+      await loadTopicList(chatId, false, { silent: true });
     }
   }
   async function refreshAfterReply(threadId, msgs, chatId) {
@@ -1784,10 +1840,10 @@
     const t = state.thread;
     if (!t || state.sending) return;
     const input = $("replyInput");
-    const text = input.value.replace(/\s+$/, "");
+    const draftText = input.value.replace(/\s+$/, "");
     const items = replyTray.ready();
     if (replyTray.uploading()) { updateReplyHint(); return; }
-    if (!text.trim() && !items.length) return;
+    if (!draftText.trim() && !items.length) return;
     if (state.auth.can_reply === false) { renderComposer(); return; }
     let encrypt = true;
     if (items.length) {
@@ -1797,7 +1853,9 @@
     }
     let threadId = t.topic.thread_id;
     const chatId = t.topic.chat_id;
-    const mentions = state.mentions.filter((m) => text.includes("@" + m.name));
+    const text = workspaceMessageText(draftText, chatId, "replyWorkspace");
+    if (text.length > input.maxLength) { setReplyErr("附带工作区后超出消息长度上限", "warn"); return; }
+    const mentions = state.mentions.filter((m) => draftText.includes("@" + m.name));
     const uuid = newUUID();
     state.viewGen++;
     state.sending = true; $("btnSend").disabled = true; setReplyErr(null); replyMention.close();
@@ -1867,12 +1925,12 @@
     } catch (e) {
       if (pendRow && pendRow.isConnected) pendRow.remove();
       // keep what was typed (and the attachments) so it can be sent again
-      state.drafts[draftKey] = text; saveDrafts(true);
+      state.drafts[draftKey] = draftText; saveDrafts(true);
       state.sending = false;
       if (uploadScopeErr(e)) { state.auth.can_upload = false; state.uploadScopeErr = e; }
       else if (isScopeErr(e)) { state.auth.can_reply = false; state.scopeErr = e; }
       if (state.active === draftKey) {
-        input.value = text; autosize(true); renderComposer();
+        input.value = draftText; autosize(true); renderComposer();
         if (!isScopeErr(e) || uploadScopeErr(e)) setReplyErr(e); // missing-send-scope is explained by the re-login notice
       }
     }
@@ -1983,10 +2041,7 @@
   async function openNewTopic() {
     if (!state.auth.logged_in) return;
     if (!state.chats.length) {
-      try {
-        const r = await api("/api/chats");
-        state.chats = r.chats || [];
-      } catch (_) {}
+      try { await loadChats(); } catch (_) {}
     }
     const available = ntChats();
     if (!available.length) {
@@ -2015,15 +2070,18 @@
     }
     ntHint(); ntLoadRecent();
     $("ntModal").hidden = false;
+    workspaceNewTopicDefault();
     setTimeout(() => $("ntInput").focus(), 0);
   }
   function closeNewTopic() { if (nt.sending) return; $("ntModal").hidden = true; ntTray.reset(true); ntMention.close(); }
   async function sendNewTopic() {
     if (nt.sending) return;
-    const input = $("ntInput"), text = input.value.replace(/\s+$/, ""), items = ntTray.ready();
+    const input = $("ntInput"), draftText = input.value.replace(/\s+$/, ""), items = ntTray.ready();
     if (ntTray.uploading()) return;
-    if (!text.trim() && !items.length) { ntSetErr("请输入话题内容或添加附件", "warn"); return; }
+    if (!draftText.trim() && !items.length) { ntSetErr("请输入话题内容或添加附件", "warn"); return; }
     const chatId = $("ntChat").value, mode = ntMode();
+    const text = workspaceMessageText(draftText, chatId, "ntWorkspace");
+    if (text.length > input.maxLength) { ntSetErr("附带工作区后超出消息长度上限", "warn"); return; }
     if (mode === "reply" && !nt.replyTo) { ntSetErr("请选择要在其下开启话题的消息", "warn"); return; }
     let encrypt = true;
     if (items.length) {
@@ -2031,7 +2089,7 @@
       if (choice === null) return;
       encrypt = choice;
     }
-    const mentions = nt.mentions.filter((m) => text.includes("@" + m.name));
+    const mentions = nt.mentions.filter((m) => draftText.includes("@" + m.name));
     nt.sending = true; $("ntSend").disabled = true; $("ntSend").textContent = "发送中…"; ntSetErr(null);
     try {
       const r = await api("/api/topics/new", {
@@ -2080,6 +2138,7 @@
     if (chosen) {
       $("ntTitle").textContent = "发起新话题 · " + chosen.name;
     }
+    workspaceNewTopicDefault();
     ntLoadRecent();
   };
   document.querySelectorAll('input[name="ntMode"]').forEach((r) => { r.onchange = ntLoadRecent; });
@@ -2175,6 +2234,13 @@
     body.textContent = ""; body.classList.remove("previewing");
     renderTabs();
     if (state.preview) { renderPreview(body); return; }
+    if (state.tab === "workspace") {
+      updateWorkspaceHeader();
+      const chatId = workspaceChat();
+      renderWorkspaceTree(body, chatId ? workspaceModel(chatId) : null, "panel");
+      body.scrollTop = keepTop;
+      return;
+    }
     if (state.tab === "dl") { renderDownloaded(body); body.scrollTop = keepTop; return; }
     if (!t) { $("filesCount").textContent = ""; body.appendChild(el("div", "empty small", "选择话题后在此显示附件")); return; }
     renderFileSync(body);
@@ -2249,14 +2315,13 @@
     const isLink = a.kind === "doc" || a.kind === "link" || a.kind === "unresolved";
     const it = dlOf(a);
     const failed = isFailed(a);
-    const doneLocal = !!(it && it.status === "done" && state.dl.opener);
+    const source = workspaceAttachmentSource(a);
     const row = el("div", "file" + (failed ? " failed" : ""));
-    if (doneLocal && !isLink) {
-      row.onclick = () => openLocal(it);
-    } else if (isLink) {
-      const h = safeHref(a.url);
-      if (h) row.onclick = () => window.open(h, "_blank", "noopener,noreferrer");
-    } else row.onclick = () => openPreview(a);
+    if (source) {
+      row.onclick = () => openWorkspacePreview(source);
+      row.tabIndex = 0;
+      row.onkeydown = (e) => { if (e.target === row && e.key === "Enter") row.click(); };
+    } else if (safeHref(a.url)) row.onclick = () => window.open(a.url, "_blank", "noopener,noreferrer");
     const th = el("div", "thumb");
     const key = failKey(a.message_id, a.file_key);
     if (!failed && it && it.status === "done" && a.kind === "image") { const i = el("img"); i.loading = "lazy"; i.alt = ""; i.src = resUrl(a); i.onerror = () => { i.remove(); th.textContent = "🖼️"; markFailed(key); }; th.appendChild(i); }
@@ -2265,7 +2330,7 @@
     const info = el("div", "info");
     const name = el(isLink ? "a" : "div", "fname", (isLink && it && dlDisplayName(it)) || a.name || a.url);
     name.title = "";
-    if (isLink && safeHref(a.url)) { name.href = safeHref(a.url); name.target = "_blank"; name.rel = "noopener noreferrer"; name.onclick = (ev) => ev.stopPropagation(); }
+    if (isLink && safeHref(a.url)) { name.href = workspaceNavigationURL(a.url); name.target = "_blank"; name.rel = "noopener noreferrer"; name.onclick = (ev) => ev.stopPropagation(); }
     info.appendChild(name);
     const sub = el("div", "fsub");
     if (isLink && !it) sub.textContent = a.kind === "doc" ? "未下载 · 该类型暂不支持导出，可在线打开" : a.url;
@@ -2281,7 +2346,7 @@
     }
     info.appendChild(sub);
     if (it && isPendingDl(it)) info.appendChild(downloadProgressNode(it));
-    if (!failed) row.title = (a.name || a.url || "") + (doneLocal ? "\n点击用默认应用打开 · 右键在文件夹中显示" : "");
+    if (!failed) row.title = (a.name || a.url || "") + (source ? "\n点击在飞书中预览 · 右键查看更多操作" : "");
     row.appendChild(info);
     if (it) { const acts = el("div", "acts"); acts.appendChild(downloadButton(it)); row.appendChild(acts); }
     if (a.resource_type === "folder") {
@@ -2289,7 +2354,7 @@
       b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); expandFolder(a, b); };
       row.appendChild(b);
     }
-    withFileMenu(row, () => dlOf(a));
+    withWorkspaceResource(row, source, () => dlOf(a), a);
     return row;
   }
   // ---------- "已下载" tab ----------
@@ -2324,20 +2389,21 @@
     row.appendChild(info);
     const acts = el("div", "acts");
     acts.appendChild(downloadButton(i));
-    const bOpen = el("button", null, state.dl.opener ? "打开" : "查看"); bOpen.type = "button"; bOpen.disabled = !done;
-    bOpen.title = state.dl.opener ? "用本地默认应用打开" : "在浏览器中查看";
-    bOpen.onclick = (ev) => { ev.stopPropagation(); openLocal(i); };
+    const source = workspaceDownloadSource(i);
+    const bOpen = el("button", null, "预览"); bOpen.type = "button";
+    bOpen.title = "在飞书中预览";
+    bOpen.onclick = (ev) => { ev.stopPropagation(); openWorkspacePreview(source); };
     acts.appendChild(bOpen);
     if (state.dl.opener) { const bf = el("button", null, "📂"); bf.type = "button"; bf.title = "在文件夹中显示"; bf.disabled = !done; bf.onclick = (ev) => { ev.stopPropagation(); revealLocal(i); }; acts.appendChild(bf); }
     row.appendChild(acts);
-    row.title = (i.path || i.name || "") + (done ? "\n点击用默认应用打开 · 右键在文件夹中显示或更多操作" : "");
+    row.title = (i.path || i.name || "") + "\n点击在飞书中预览 · 右键查看更多操作";
     row.onclick = () => {
       document.querySelectorAll(".file.dl.sel").forEach((n) => n.classList.remove("sel"));
       row.classList.add("sel");
-      if (done) openLocal(i);
+      openWorkspacePreview(source);
     };
-    row.onkeydown = (ev) => { if (ev.key === "Enter" && done) openLocal(i); };
-    withFileMenu(row, () => i);
+    row.onkeydown = (ev) => { if (ev.target === row && ev.key === "Enter") row.click(); };
+    withWorkspaceResource(row, source, () => i, dlAsAtt(i));
     return row;
   }
   function renderDownloaded(body) {
@@ -2375,10 +2441,6 @@
       body.appendChild(el("div", "sec", "受限附件"));
       for (const a of unavailable) body.appendChild(fileRow(a));
     }
-  }
-  function openPreviewFor(messageId, key, resType, name, kind, cover) {
-    const found = state.thread && (state.thread.attachments || []).find((a) => a.message_id === messageId && a.file_key === key);
-    openPreview(found || { id: resType + ":" + messageId + ":" + key, kind, name, message_id: messageId, file_key: key, res_type: resType, cover_key: cover });
   }
   function openPreview(a) { state.preview = a; renderFiles(); }
   const TEXT_EXT = new Set(["txt", "md", "csv", "json", "log", "xml", "yaml", "yml", "ini", "sql", "go", "py", "js", "ts", "java", "sh", "html", "css"]);
@@ -2454,6 +2516,33 @@
 
   // ---------- group selector ----------
   let draft = new Set();
+  let chatsRequest = null;
+  function loadChats(cachedFirst = false) {
+    if (chatsRequest) return chatsRequest;
+    const auth = state.auth;
+    const apply = (r) => {
+      if (state.auth !== auth) return;
+      const chats = r.chats || [];
+      if (JSON.stringify(state.chats) === JSON.stringify(chats)) return;
+      state.chats = chats;
+      renderGroupButton();
+      if (!$("modal").hidden) renderGroups();
+    };
+    chatsRequest = (async () => {
+      if (cachedFirst) {
+        try {
+          const r = await api("/api/chats?cached=1");
+          if (r.from_cache === true) apply(r);
+        } catch (_) { /* continue with the live request */ }
+      }
+      if (state.auth === auth) apply(await api("/api/chats"));
+    })().finally(() => {
+      chatsRequest = null;
+      updateRefreshIndicator();
+    });
+    updateRefreshIndicator();
+    return chatsRequest;
+  }
   function renderGroups() {
     const box = $("groupList"); box.textContent = "";
     const q = $("groupSearch").value.trim().toLowerCase();
@@ -2480,14 +2569,19 @@
   async function openModal() {
     draft = new Set(state.selection);
     $("modal").hidden = false; $("groupSearch").value = "";
-    $("groupList").textContent = ""; $("groupList").appendChild(el("div", "loading", "加载群聊列表…"));
+    if (state.chats.length) renderGroups();
+    else {
+      $("groupList").textContent = "";
+      $("groupList").appendChild(el("div", "loading", "加载群聊列表…"));
+    }
     try {
-      const r = await api("/api/chats");
-      state.chats = r.chats || [];
+      await loadChats();
       renderGroups();
     } catch (e) {
-      $("groupList").textContent = "";
-      $("groupList").appendChild(banner("err", "获取群聊列表失败：" + e.message, e.hint));
+      if (!state.chats.length) {
+        $("groupList").textContent = "";
+        $("groupList").appendChild(banner("err", "获取群聊列表失败：" + e.message, e.hint));
+      }
     }
   }
   const closeModal = () => { $("modal").hidden = true; };
@@ -2519,7 +2613,7 @@
       renderThread();
       renderFiles();
     }
-    await loadTopics(false);
+    await loadTopics(false, { cachedFirst: true });
     startAutoRefresh();
   };
 
@@ -2550,6 +2644,9 @@
           x.attachment_count !== y.attachment_count ||
           x.sender_id !== y.sender_id ||
           x.sender_name !== y.sender_name ||
+          x.sender_avatar !== y.sender_avatar ||
+          x.sender_type !== y.sender_type ||
+          x.create_time !== y.create_time ||
           x.chat_id !== y.chat_id ||
           x.chat_name !== y.chat_name) {
         return false;
@@ -2558,50 +2655,10 @@
     return true;
   }
 
-  let refreshingTopics = false;
-  async function refreshTopicListSilently() {
-    if (refreshingTopics || !state.auth.logged_in) return;
-    refreshingTopics = true;
-    try {
-      if (state.listTab === "my") {
-        const r = await api("/api/topics/my");
-        if (!state.auth.logged_in) return;
-        const newTopics = r.topics || [];
-        if (!sameTopics(state.myTopics, newTopics)) {
-          state.myTopics = newTopics;
-          state.myLoaded = true;
-          if (state.active && document.hasFocus && document.hasFocus()) {
-            markTopicRead(state.active);
-          }
-          renderListKeepScroll();
-        }
-      } else {
-        if (!state.selection.length) return;
-        let anyChanged = false;
-        await Promise.all(state.selection.map(async (id) => {
-          try {
-            const r = await api("/api/topics?chat_id=" + encodeURIComponent(id));
-            if (!state.auth.logged_in) return;
-            const newTopics = r.topics || [];
-            if (!sameTopics(state.byChat[id], newTopics)) {
-              state.byChat[id] = newTopics;
-              anyChanged = true;
-            }
-          } catch (_) {}
-        }));
-        if (anyChanged) {
-          rebuildTopics();
-          if (state.active && document.hasFocus && document.hasFocus()) {
-            markTopicRead(state.active);
-          }
-          renderListKeepScroll();
-        }
-      }
-    } catch (_) {
-      // background silent polling: ignore temporary network errors
-    } finally {
-      refreshingTopics = false;
-    }
+  function refreshTopicListSilently({ cachedFirst = false } = {}) {
+    if (!state.auth.logged_in) return;
+    const options = { cachedFirst, silent: true };
+    return state.listTab === "my" ? loadMyTopics(false, options) : loadTopics(false, options);
   }
 
   function syncTopicFromThread(t) {
@@ -2699,7 +2756,7 @@
     stopAutoRefresh();
     if (state.auth.logged_in) scheduleAutoRefresh(THREAD_POLL_MS);
   }
-  async function runAutoRefresh() {
+  async function runAutoRefresh(topicInterval = TOPIC_LIST_POLL_MS) {
     if (polling) return;
     if (!state.auth.logged_in) return;
     if (document.hidden) { scheduleAutoRefresh(THREAD_POLL_MS); return; }
@@ -2710,8 +2767,7 @@
         await refreshOpenThread(gen);
       }
       const now = Date.now();
-      if (now - lastTopicPoll >= TOPIC_LIST_POLL_MS) {
-        lastTopicPoll = now;
+      if (!startingTopics && !topicLoads.size && now - lastTopicPoll >= topicInterval) {
         await refreshTopicListSilently();
       }
     } catch (e) {
@@ -2722,21 +2778,854 @@
       if (state.auth.logged_in) scheduleAutoRefresh(nextMs);
     }
   }
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden || !state.auth.logged_in) return;
-    lastTopicPoll = 0;
+  function refreshOnReturn() {
+    if (document.hidden || !state.auth.logged_in || startingTopics || polling) return;
     stopAutoRefresh();
-    runAutoRefresh();
-  });
-  window.addEventListener("focus", () => {
-    if (document.hidden || !state.auth.logged_in) return;
-    const now = Date.now();
-    if (now - lastTopicPoll >= 3000) {
-      lastTopicPoll = 0;
-      stopAutoRefresh();
-      runAutoRefresh();
+    runAutoRefresh(3000);
+  }
+  document.addEventListener("visibilitychange", refreshOnReturn);
+  window.addEventListener("focus", refreshOnReturn);
+
+  // ---------- group workspace ----------
+  function workspaceRequest(path, body, method = "POST") {
+    const send = async (fresh) => api(path, {
+      method, headers: { "Content-Type": "application/json", "X-FT-CSRF": await csrfToken(fresh) },
+      ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
+    });
+    return send(false).catch((e) => { if (/CSRF/.test(e.message)) return send(true); throw e; });
+  }
+  function workspaceURL(path, params) {
+    return "/api/workspace" + path + "?" + new URLSearchParams(params);
+  }
+  function workspaceChat() {
+    const topic = (state.thread && state.thread.topic) || (state.active && [...state.topics, ...state.myTopics].find((t) => t.thread_id === state.active));
+    return (topic && topic.chat_id) || "";
+  }
+  function workspaceChatName(chatId) {
+    const chat = state.chats.find((c) => c.chat_id === chatId);
+    const topic = state.thread && state.thread.topic;
+    return (chat && chat.name) || (topic && topic.chat_id === chatId && topic.chat_name) || chatId;
+  }
+  function workspaceModel(chatId) {
+    if (!state.workspaces.has(chatId)) {
+      state.workspaces.set(chatId, { chatId, data: null, tree: new Map(), pending: null, error: "" });
     }
+    return state.workspaces.get(chatId);
+  }
+  function loadWorkspace(model) {
+    if (model.pending) return model.pending;
+    model.error = "";
+    model.pending = api(workspaceURL("", { chat_id: model.chatId })).then((data) => {
+      model.data = data;
+    }).catch((e) => {
+      model.error = e.message;
+    }).finally(() => {
+      model.pending = null;
+      if (state.workspaces.get(model.chatId) === model) updateWorkspaceViews(model);
+    });
+    return model.pending;
+  }
+  function workspaceAttachmentDefault(id, chatId, model, reset = false) {
+    const box = $(id);
+    if (reset || box.dataset.chatId !== chatId) {
+      box.dataset.chatId = chatId;
+      delete box.dataset.changed;
+      box.checked = false;
+    }
+    const hasLinks = !!(model && model.data && model.data.items.some((item) => item.kind !== "local_dir" && feishuWorkspaceHref(item.url)));
+    if (!box.dataset.changed && model && model.data) box.checked = hasLinks && !!model.data.attach_context;
+    box.disabled = !hasLinks;
+  }
+  function updateWorkspaceHeader() {
+    const chatId = workspaceChat();
+    const model = chatId ? workspaceModel(chatId) : null;
+    $("btnWorkspace").disabled = !chatId;
+    const count = (model && model.data && model.data.items.length) || 0;
+    $("workspaceCount").textContent = count || "";
+    workspaceAttachmentDefault("replyWorkspace", chatId, model);
+    if (model && !model.data && !model.pending && !model.error && state.auth.logged_in) loadWorkspace(model);
+  }
+  function updateWorkspaceViews(model) {
+    if (workspaceChat() === model.chatId) {
+      updateWorkspaceHeader();
+      if (state.tab === "workspace" && !state.preview) renderFiles();
+    }
+    if (!$("ntModal").hidden && $("ntChat").value === model.chatId) workspaceAttachmentDefault("ntWorkspace", model.chatId, model);
+    const modal = state.workspaceModal;
+    if (modal && modal.model === model && modal.mode !== "settings") renderWorkspacePicker();
+  }
+  function workspaceNewTopicDefault() {
+    const chatId = $("ntChat").value;
+    const model = workspaceModel(chatId);
+    workspaceAttachmentDefault("ntWorkspace", chatId, model, true);
+    if (chatId && !model.data) loadWorkspace(model);
+  }
+  function feishuWorkspaceHref(href) {
+    try {
+      const u = new URL(href);
+      if (!/^https?:$/.test(u.protocol) || u.username || u.password) return "";
+      if (!/(^|\.)(feishu\.cn|larksuite\.com|larkoffice\.com|feishu\.net|feishu-pre\.net)$/i.test(u.hostname)) return "";
+      return /^\/(?:docs?|docx|sheets|base|bitable|mindnotes|slides|minutes|file|folder|wiki|drive)\//.test(u.pathname) ? u.href : "";
+    } catch (_) { return ""; }
+  }
+  function workspaceMarkdown(name, href) {
+    return "[" + (name || "飞书文档").replace(/[\[\]\r\n@]/g, " ") + "](" + href.replace(/[()]/g, (ch) => ch === "(" ? "%28" : "%29") + ")";
+  }
+  function workspaceMessageText(text, chatId, checkbox) {
+    const box = $(checkbox), model = state.workspaces.get(chatId);
+    if (!box.checked || box.dataset.chatId !== chatId || !model || !model.data) return text;
+    const links = model.data.items.flatMap((item) => {
+      const href = item.kind !== "local_dir" && feishuWorkspaceHref(item.url);
+      return href ? ["- " + workspaceMarkdown(item.name, href)] : [];
+    });
+    return links.length ? [text, "群工作区\n" + links.join("\n")].filter(Boolean).join("\n\n") : text;
+  }
+
+  function workspaceButton(text, action, className = "btn sm") {
+    const b = el("button", className, text);
+    b.type = "button";
+    b.onclick = (e) => { e.stopPropagation(); action(e); };
+    return b;
+  }
+  function closeWorkspaceModal() {
+    $("workspaceModal").hidden = true;
+    if (state.workspaceModal && state.workspaceModal.focus && state.workspaceModal.focus.isConnected) state.workspaceModal.focus.focus();
+    state.workspaceModal = null;
+  }
+  const wsKindLabel = { wiki: "知识库", feishu_folder: "飞书云盘", local_dir: "本地文件夹" };
+  function setWorkspaceTab(modal, tab) {
+    modal.tab = tab;
+    for (const [id, name] of [["local", "wsTabBtnLocal"], ["drive", "wsTabBtnDrive"], ["wiki", "wsTabBtnWiki"]]) {
+      const on = tab === id;
+      $(name).classList.toggle("on", on);
+      $(name).setAttribute("aria-selected", String(on));
+      $("wsTab" + (id === "local" ? "Local" : id === "drive" ? "Drive" : "Wiki")).hidden = !on;
+    }
+    if (tab === "local") ensureWorkspaceLocalBrowser(modal);
+    else if (tab === "drive") ensureWorkspaceDriveBrowser(modal);
+    else ensureWorkspaceWikiBrowser(modal);
+  }
+  function renderWorkspaceCrumbs(box, crumbs, onPick) {
+    box.replaceChildren();
+    (crumbs || []).forEach((crumb, i) => {
+      if (i) box.appendChild(el("span", null, "›"));
+      const b = el("button", "ws-crumb", crumb.name || crumb.path);
+      b.type = "button";
+      b.onclick = () => onPick(crumb);
+      box.appendChild(b);
+    });
+  }
+  async function persistWorkspace(modal, items, attachContext, quiet) {
+    modal.saving = (modal.saving || 0) + 1;
+    if (!quiet) $("workspaceError").textContent = "正在保存…";
+    try {
+      const data = await workspaceRequest("/api/workspace", {
+        chat_id: modal.model.chatId,
+        attach_context: attachContext ?? $("workspaceAttach").checked,
+        items,
+      });
+      const next = new Map(data.items.map((item) => [item.id, JSON.stringify([item.kind, item.token, item.space_id, item.local_path])]));
+      for (const [key, branch] of modal.model.tree) {
+        if (next.get(branch.itemId) !== branch.binding) modal.model.tree.delete(key);
+      }
+      modal.model.data = data;
+      modal.items = data.items.map((item) => ({ ...item }));
+      if (state.workspaceModal === modal) renderWorkspaceBindings(modal);
+      updateWorkspaceViews(modal.model);
+      if (!quiet) toast("工作区已更新");
+      return data;
+    } catch (e) {
+      if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
+      throw e;
+    } finally {
+      modal.saving = Math.max(0, (modal.saving || 1) - 1);
+      if (state.workspaceModal === modal && !modal.saving) $("workspaceError").textContent = "";
+    }
+  }
+  async function bindWorkspaceItem(modal, item, quiet) {
+    const exists = modal.items.some((entry) => entry.kind === item.kind && (entry.local_path === item.local_path || (entry.token && entry.token === item.token) || (entry.space_id && entry.space_id === item.space_id && !item.token)));
+    const items = exists ? modal.items : [...modal.items, item];
+    await persistWorkspace(modal, items, undefined, quiet);
+  }
+  async function openWorkspaceModal(chatId, mode = "settings", source = null) {
+    if (!chatId) return;
+    const model = workspaceModel(chatId);
+    const modal = {
+      model, mode, source, items: [], tab: "local", focus: document.activeElement,
+      local: { dir: "", places: null, gen: 0 }, drive: { token: "", crumbs: [], page: "", gen: 0 },
+      wiki: { spaceId: "", node: "", crumbs: [], page: "", gen: 0 },
+    };
+    state.workspaceModal = modal;
+    $("workspaceError").textContent = "";
+    $("workspacePickHint").hidden = true;
+    $("workspaceLinkInput").value = "";
+    $("workspaceTitle").textContent = (mode === "settings" ? "群工作区" : mode === "transfer" ? "转存到工作区" : "引用工作区") + " · " + workspaceChatName(chatId);
+    $("workspaceSettings").hidden = mode !== "settings";
+    $("workspacePickerTree").hidden = mode === "settings";
+    $("workspaceActions").hidden = mode !== "settings";
+    $("workspaceModal").hidden = false;
+    $("workspaceClose").focus();
+    if (mode !== "settings") {
+      if (!model.data) loadWorkspace(model);
+      renderWorkspacePicker();
+      return;
+    }
+    $("workspaceBindings").replaceChildren(el("div", "loading", "加载工作区…"));
+    if (!model.data) await loadWorkspace(model);
+    if (state.workspaceModal !== modal) return;
+    if (!model.data) {
+      $("workspaceBindings").replaceChildren();
+      $("workspaceError").textContent = model.error || "无法加载工作区";
+      return;
+    }
+    modal.items = model.data.items.map((item) => ({ ...item }));
+    $("workspaceAttach").checked = model.data.attach_context;
+    renderWorkspaceBindings(modal);
+    setWorkspaceTab(modal, "local");
+  }
+  function renderWorkspaceBindings(modal) {
+    const list = $("workspaceBindings");
+    list.replaceChildren();
+    if (!modal.items.length) list.appendChild(el("p", "hint", "此群还没有绑定目录。"));
+    for (const item of modal.items) {
+      const row = el("div", "ws-binding");
+      const input = el("input");
+      input.value = item.name || "";
+      input.placeholder = "名称（修改后回车保存）";
+      input.setAttribute("aria-label", "工作区名称");
+      const saveName = () => {
+        const name = input.value.trim();
+        if (name === item.name) return;
+        item.name = name;
+        persistWorkspace(modal, modal.items, undefined, true).catch(() => {});
+      };
+      input.onchange = saveName;
+      input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); saveName(); } };
+      const path = item.local_path || item.url || wsKindLabel[item.kind];
+      row.append(input, workspaceButton("移除", () => {
+        persistWorkspace(modal, modal.items.filter((entry) => entry !== item), undefined, false).catch(() => {});
+      }), el("div", "hint ws-binding-path", path));
+      list.appendChild(row);
+    }
+  }
+  async function ensureWorkspaceLocalBrowser(modal) {
+    if (!modal.local.places) {
+      try {
+        const p = await workspaceRequest(workspaceURL("/local/places", {}), null, "GET");
+        if (state.workspaceModal !== modal) return;
+        modal.local.places = p.items || [];
+        const bar = $("workspaceLocalPlaces");
+        bar.replaceChildren();
+        for (const place of modal.local.places) {
+          bar.appendChild(workspaceButton((place.icon ? place.icon + " " : "") + place.label, () => browseWorkspaceLocal(modal, place.path), "btn sm ws-place"));
+        }
+      } catch (e) {
+        $("workspaceLocalPlaces").replaceChildren(el("span", "hint", e.message));
+      }
+    }
+    if (!modal.local.dir) browseWorkspaceLocal(modal, "");
+  }
+  async function browseWorkspaceLocal(modal, dir) {
+    const gen = ++modal.local.gen;
+    const box = $("workspaceLocalList");
+    box.replaceChildren(el("div", "loading", "正在读取目录…"));
+    $("workspaceBindLocalDir").hidden = true;
+    try {
+      const data = await workspaceRequest(workspaceURL("/local/browse", { dir }), null, "GET");
+      if (state.workspaceModal !== modal || gen !== modal.local.gen) return;
+      modal.local.dir = data.dir;
+      renderWorkspaceCrumbs($("workspaceLocalCrumbs"), data.breadcrumbs, (crumb) => browseWorkspaceLocal(modal, crumb.path));
+      box.replaceChildren();
+      for (const item of data.items || []) {
+        const row = el("div", "ws-browser-row");
+        const name = workspaceButton("📁 " + item.name, () => browseWorkspaceLocal(modal, item.path), "ws-browser-name");
+        row.append(name, workspaceButton("绑定", () => bindWorkspaceItem(modal, { kind: "local_dir", local_path: item.path, name: item.name }, false), "btn sm"));
+        box.appendChild(row);
+      }
+      if (!(data.items || []).length) box.appendChild(el("p", "hint", "此处没有子文件夹。"));
+      const bindCurrent = $("workspaceBindLocalDir");
+      bindCurrent.hidden = false;
+      bindCurrent.textContent = "绑定当前目录 · " + data.dir;
+      bindCurrent.onclick = () => bindWorkspaceItem(modal, { kind: "local_dir", local_path: data.dir, name: data.dir.split("/").pop() || data.dir }, false);
+    } catch (e) {
+      if (gen === modal.local.gen) box.replaceChildren(el("div", "banner err", e.message));
+    }
+  }
+  async function ensureWorkspaceDriveBrowser(modal) {
+    if (!modal.drive.token) modal.drive = { token: "", crumbs: [{ name: "我的云空间", token: "" }], page: "", gen: modal.drive.gen || 0 };
+    browseWorkspaceDrive(modal, modal.drive.token, false);
+  }
+  async function browseWorkspaceDrive(modal, token, more) {
+    const gen = ++modal.drive.gen;
+    const box = $("workspaceDriveList");
+    if (!more) box.replaceChildren(el("div", "loading", "正在读取云盘…"));
+    $("workspaceDriveMore").hidden = true;
+    try {
+      const data = await workspaceRequest(workspaceURL("/cloud/browse", { kind: "feishu_folder", token, page_token: more ? modal.drive.page : "" }), null, "GET");
+      if (state.workspaceModal !== modal || gen !== modal.drive.gen) return;
+      modal.drive.token = token || (data.parent && data.parent.token) || "";
+      modal.drive.page = data.has_more ? data.next_page_token : "";
+      if (!modal.drive.crumbs.length) {
+        modal.drive.crumbs = [{ name: "我的云空间", token: modal.drive.token }];
+      } else if (!token && modal.drive.crumbs.length === 1 && !modal.drive.crumbs[0].token) {
+        modal.drive.crumbs[0].token = modal.drive.token;
+      }
+      renderWorkspaceCrumbs($("workspaceDriveCrumbs"), modal.drive.crumbs, (crumb) => {
+        const idx = modal.drive.crumbs.indexOf(crumb);
+        if (idx >= 0) modal.drive.crumbs = modal.drive.crumbs.slice(0, idx + 1);
+        browseWorkspaceDrive(modal, crumb.token, false);
+      });
+      const filter = $("workspaceDriveFilter").value.trim().toLowerCase();
+      if (!more) box.replaceChildren();
+      for (const item of (data.items || []).filter((row) => !filter || (row.name || "").toLowerCase().includes(filter))) {
+        const row = el("div", "ws-browser-row");
+        const name = workspaceButton("📁 " + item.name, () => {
+          modal.drive.crumbs = [...modal.drive.crumbs, { name: item.name, token: item.token }];
+          browseWorkspaceDrive(modal, item.token, false);
+        }, "ws-browser-name");
+        row.append(name, workspaceButton("绑定", () => bindWorkspaceItem(modal, { kind: "feishu_folder", token: item.token, name: item.name, url: item.url }, false), "btn sm"));
+        box.appendChild(row);
+      }
+      if (!more && !(data.items || []).length) box.appendChild(el("p", "hint", "没有子文件夹。"));
+      const currentCrumb = modal.drive.crumbs[modal.drive.crumbs.length - 1];
+      const currentDriveName = (currentCrumb && currentCrumb.name) || "云盘文件夹";
+      const bindCurrent = $("workspaceBindDriveDir");
+      bindCurrent.hidden = !modal.drive.token;
+      bindCurrent.textContent = modal.drive.token && modal.drive.crumbs.length > 1
+        ? "绑定当前文件夹 · " + currentDriveName
+        : "绑定「我的云空间」根目录";
+      bindCurrent.onclick = () => bindWorkspaceItem(modal, {
+        kind: "feishu_folder",
+        token: modal.drive.token,
+        name: currentDriveName,
+      }, false);
+      const moreBtn = $("workspaceDriveMore");
+      moreBtn.hidden = !data.has_more;
+      moreBtn.onclick = () => browseWorkspaceDrive(modal, modal.drive.token, true);
+    } catch (e) {
+      if (gen === modal.drive.gen && !more) box.replaceChildren(el("div", "banner err", e.message));
+    }
+  }
+  async function ensureWorkspaceWikiBrowser(modal) {
+    if (!modal.wiki.crumbs.length) modal.wiki.crumbs = [{ name: "全部知识库", space_id: "", node: "" }];
+    browseWorkspaceWiki(modal, modal.wiki.spaceId, modal.wiki.node, false);
+  }
+  async function browseWorkspaceWiki(modal, spaceId, node, more) {
+    const gen = ++modal.wiki.gen;
+    const box = $("workspaceWikiList");
+    if (!more) box.replaceChildren(el("div", "loading", "正在读取知识库…"));
+    $("workspaceWikiMore").hidden = true;
+    try {
+      const data = await workspaceRequest(workspaceURL("/cloud/browse", { kind: "wiki", space_id: spaceId, node, page_token: more ? modal.wiki.page : "" }), null, "GET");
+      if (state.workspaceModal !== modal || gen !== modal.wiki.gen) return;
+      modal.wiki.spaceId = spaceId;
+      modal.wiki.node = node;
+      modal.wiki.page = data.has_more ? data.next_page_token : "";
+      renderWorkspaceCrumbs($("workspaceWikiCrumbs"), modal.wiki.crumbs, (crumb) => {
+        modal.wiki.crumbs = modal.wiki.crumbs.slice(0, modal.wiki.crumbs.indexOf(crumb) + 1);
+        browseWorkspaceWiki(modal, crumb.space_id || "", crumb.node || "", false);
+      });
+      const filter = $("workspaceWikiFilter").value.trim().toLowerCase();
+      if (!more) box.replaceChildren();
+      for (const item of (data.items || []).filter((row) => !filter || (row.name || "").toLowerCase().includes(filter))) {
+        const row = el("div", "ws-browser-row");
+        const enter = () => {
+          if (item.space_id && !item.token) {
+            modal.wiki.crumbs = [...modal.wiki.crumbs, { name: item.name, space_id: item.space_id, node: "" }];
+            browseWorkspaceWiki(modal, item.space_id, "", false);
+            return;
+          }
+          modal.wiki.crumbs = [...modal.wiki.crumbs, { name: item.name, space_id: item.space_id || spaceId, node: item.token }];
+          browseWorkspaceWiki(modal, item.space_id || spaceId, item.token, false);
+        };
+        row.append(workspaceButton((item.space_id && !item.token ? "📚 " : "📁 ") + item.name, enter, "ws-browser-name"),
+          workspaceButton("绑定", () => bindWorkspaceItem(modal, item.space_id && !item.token
+            ? { kind: "wiki", space_id: item.space_id, name: item.name, url: item.url }
+            : { kind: "wiki", space_id: item.space_id || spaceId, token: item.token, name: item.name, url: item.url }, false), "btn sm"));
+        box.appendChild(row);
+      }
+      if (!more && !(data.items || []).length) box.appendChild(el("p", "hint", "没有可浏览的子节点。"));
+      const wikiCrumb = modal.wiki.crumbs[modal.wiki.crumbs.length - 1];
+      const currentWikiName = (wikiCrumb && wikiCrumb.name) || (node ? "知识库节点" : "知识库");
+      const bindCurrent = $("workspaceBindWikiDir");
+      bindCurrent.hidden = !spaceId && !node;
+      bindCurrent.textContent = node ? "绑定当前节点 · " + currentWikiName : (spaceId ? "绑定整个知识库 · " + currentWikiName : "");
+      bindCurrent.onclick = () => bindWorkspaceItem(modal, node
+        ? { kind: "wiki", space_id: spaceId, token: node, name: currentWikiName }
+        : { kind: "wiki", space_id: spaceId, name: currentWikiName }, false);
+      const moreBtn = $("workspaceWikiMore");
+      moreBtn.hidden = !data.has_more;
+      moreBtn.onclick = () => browseWorkspaceWiki(modal, spaceId, node, true);
+    } catch (e) {
+      if (gen === modal.wiki.gen && !more) box.replaceChildren(el("div", "banner err", e.message));
+    }
+  }
+  async function pickWorkspaceDirectory() {
+    const modal = state.workspaceModal, button = $("workspacePick");
+    button.disabled = true;
+    $("workspacePickHint").hidden = true;
+    try {
+      const r = await workspaceRequest("/api/workspace/local/pick", {});
+      if (state.workspaceModal !== modal) return;
+      if (r.cancelled) return;
+      if (r.path) await bindWorkspaceItem(modal, { kind: "local_dir", local_path: r.path, name: r.path.split("/").pop() || r.path }, false);
+      else if (r.fallback) {
+        const hint = $("workspacePickHint");
+        hint.hidden = false;
+        hint.textContent = r.reason || "无法打开系统文件夹选择器时，请使用下方快捷入口或浏览列表。";
+        setWorkspaceTab(modal, "local");
+      }
+    } catch (e) {
+      if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
+    } finally { button.disabled = false; }
+  }
+  async function bindWorkspaceFromLink() {
+    const modal = state.workspaceModal;
+    if (!modal) return;
+    const url = $("workspaceLinkInput").value.trim();
+    if (!feishuWorkspaceHref(url) || !/\/(?:wiki|folder|drive\/folder)\//.test(new URL(url).pathname)) {
+      $("workspaceError").textContent = "请粘贴飞书知识库或云盘文件夹链接。";
+      return;
+    }
+    $("workspaceError").textContent = "";
+    await bindWorkspaceItem(modal, { url }, false);
+    $("workspaceLinkInput").value = "";
+  }
+
+  function workspaceTreeBranch(model, item, node) {
+    const key = JSON.stringify([item.id, node.root ? "" : node.rel_path || node.token]);
+    if (!model.tree.has(key)) model.tree.set(key, {
+      itemId: item.id, binding: JSON.stringify([item.kind, item.token, item.space_id, item.local_path]),
+      expanded: false, items: null, next: "", busy: false, error: "",
+    });
+    return model.tree.get(key);
+  }
+  async function loadWorkspaceBranch(model, item, node, branch, more = false) {
+    if (branch.busy) { if (!more) branch.reload = true; return; }
+    branch.busy = true;
+    branch.error = "";
+    updateWorkspaceViews(model);
+    try {
+      const params = { chat_id: model.chatId, item_id: item.id, node: node.root ? "" : node.rel_path || node.token, page_token: more ? branch.next : "" };
+      if (node.path && node.path.length) params.path = node.path.join(",");
+      const data = await workspaceRequest(workspaceURL("/tree", params), null, "GET");
+      branch.items = more ? [...branch.items, ...data.items] : data.items;
+      branch.next = data.next_page_token || "";
+    } catch (e) {
+      branch.error = e.message;
+    } finally {
+      branch.busy = false;
+      if (branch.reload) {
+        branch.reload = false;
+        loadWorkspaceBranch(model, item, node, branch);
+      } else updateWorkspaceViews(model);
+    }
+  }
+  function renderWorkspaceNode(model, item, node, mode) {
+    const group = el("div", "ws-node");
+    const row = el("div", "ws-tree-row");
+    const branch = workspaceTreeBranch(model, item, node);
+    const toggle = () => {
+      branch.expanded = !branch.expanded;
+      if (branch.expanded && branch.items === null) loadWorkspaceBranch(model, item, node, branch);
+      else updateWorkspaceViews(model);
+    };
+    const kids = node.has_children || (branch.items && branch.items.length);
+    if (kids) {
+      const arrow = workspaceButton(branch.expanded ? "▾" : "▸", toggle, "ws-tree-toggle");
+      arrow.setAttribute("aria-label", (branch.expanded ? "折叠 " : "展开 ") + node.name);
+      arrow.setAttribute("aria-expanded", String(branch.expanded));
+      row.appendChild(arrow);
+    } else row.appendChild(el("span", "ws-tree-indent"));
+    const localFile = node.kind === "local_file";
+    const req = { chat_id: model.chatId, item_id: item.id, rel_path: node.rel_path };
+    const cloud = { kind: node.kind === "wiki" ? "wiki" : node.kind === "file" || node.kind === "folder" ? "drive" : "doc", resource_type: node.kind, resource_token: node.token, url: node.url, name: node.name };
+    const open = () => {
+      if (localFile) openWorkspacePreview(req);
+      else if (node.url || !node.can_store) openWorkspacePreview(cloud);
+      else if (kids) toggle();
+    };
+    const title = workspaceButton(node.name, mode === "transfer" && kids ? toggle : open, "ws-tree-name");
+    title.title = node.name;
+    row.appendChild(title);
+    if (localFile && (node.source_state === "linked" || node.source_state === "modified")) {
+      const linked = node.source_state === "linked";
+      const badge = el("span", "ws-source-badge " + node.source_state, linked ? "🔗 源自飞书" : "✏️ 本地已改");
+      badge.title = linked ? "与导出时一致，预览将打开原飞书文档" : "本地内容已变化，预览将上传当前版本";
+      row.appendChild(badge);
+    }
+    if (node.can_store && mode === "transfer") {
+      row.appendChild(workspaceButton("转存到此处", () => {
+        const modal = state.workspaceModal;
+        if (!modal || modal.mode !== "transfer") return;
+        closeWorkspaceModal();
+        transferToWorkspace(model, item, node, branch, modal.source);
+      }));
+    } else if (mode !== "transfer" && (localFile || node.url || (!node.can_store && node.token))) {
+      row.appendChild(workspaceButton("引用", () => citeWorkspaceFile(model, localFile ? req : cloud, localFile)));
+      if (localFile) {
+        const b = workspaceButton("显示", () => workspaceRequest("/api/workspace/reveal", req).catch((e) => toast(e.message, true)));
+        b.title = "在文件夹中显示";
+        b.disabled = !state.dl.opener;
+        row.appendChild(b);
+      }
+    }
+    if (node.can_store && mode === "panel" && (item.kind !== "local_dir" || item.local_path)) {
+      row.ondragover = (e) => {
+        const drag = state.workspaceDrag;
+        if (!drag || drag.chatId !== model.chatId) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        row.classList.add("ws-drop");
+      };
+      row.ondragleave = (e) => { if (!row.contains(e.relatedTarget)) row.classList.remove("ws-drop"); };
+      row.ondrop = (e) => {
+        const drag = state.workspaceDrag;
+        if (!drag || drag.chatId !== model.chatId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        endWorkspaceDrag();
+        transferToWorkspace(model, item, node, branch, drag.source);
+      };
+    }
+    group.appendChild(row);
+    if (branch.expanded) {
+      const children = el("div", "ws-children");
+      for (const entry of branch.items || []) {
+        const child = item.kind === "feishu_folder" ? { ...entry, path: [...(node.path || []), entry.token] } : entry;
+        children.appendChild(renderWorkspaceNode(model, item, child, mode));
+      }
+      if (branch.error) {
+        children.append(el("div", "hint ws-error", branch.error),
+          workspaceButton("重试", () => loadWorkspaceBranch(model, item, node, branch)));
+      } else if (branch.busy) children.appendChild(el("div", "hint", "加载中…"));
+      else if (branch.next) children.appendChild(workspaceButton("加载更多", () => loadWorkspaceBranch(model, item, node, branch, true)));
+      else if (branch.items && !branch.items.length) children.appendChild(el("div", "hint", "此处暂无文件"));
+      group.appendChild(children);
+    }
+    return group;
+  }
+  function renderWorkspaceTree(body, model, mode) {
+    if (!model || !model.data || !model.data.items.length) {
+      const empty = el("div", "empty small ws-empty");
+      if (!model) empty.appendChild(el("div", null, "选择群话题后，可配置并浏览群工作区。"));
+      else if (model.pending) empty.appendChild(el("div", null, "正在加载群工作区…"));
+      else if (model.error) empty.append(el("div", null, model.error), workspaceButton("重试", () => { loadWorkspace(model); updateWorkspaceViews(model); }));
+      else empty.append(el("div", null, "该群还没有绑定工作区。"), workspaceButton("配置工作区", () => openWorkspaceModal(model.chatId)));
+      body.appendChild(empty);
+      return;
+    }
+    const tree = el("div", "ws-tree");
+    for (const item of model.data.items) {
+      if (item.kind === "local_dir" && !item.local_path) {
+        tree.appendChild(el("div", "hint ws-unavailable", item.name + " · 请在本机访问"));
+        continue;
+      }
+      const node = {
+        root: true, kind: item.kind === "feishu_folder" ? "folder" : item.kind, name: item.name, token: item.token,
+        has_children: true, can_store: true, url: item.url, rel_path: "",
+      };
+      tree.appendChild(renderWorkspaceNode(model, item, node, mode));
+    }
+    body.appendChild(tree);
+  }
+  function renderWorkspacePicker() {
+    const modal = state.workspaceModal;
+    if (!modal || modal.mode === "settings") return;
+    const body = $("workspacePickerTree"), top = body.scrollTop;
+    body.replaceChildren();
+    renderWorkspaceTree(body, modal.model, modal.mode);
+    body.scrollTop = top;
+  }
+  async function transferToWorkspace(model, item, node, branch, source) {
+    if (branch.transferring) return;
+    branch.transferring = true;
+    toast("正在转存到「" + node.name + "」…", false, true);
+    try {
+      const r = await workspaceRequest("/api/workspace/transfer", {
+        chat_id: model.chatId, target_item_id: item.id, target_node: node.root ? "" : node.token || "",
+        target_subpath: node.rel_path || "", target_path: node.path || [], source,
+      });
+      branch.expanded = true;
+      loadWorkspaceBranch(model, item, node, branch);
+      toast("已转存「" + r.name + "」到「" + node.name + "」");
+    } catch (e) {
+      toast("转存失败：" + e.message, true);
+    } finally { branch.transferring = false; }
+  }
+  async function citeWorkspaceFile(model, source, local) {
+    const isNew = !$("ntModal").hidden && $("ntChat").value === model.chatId;
+    const thread = state.thread;
+    const input = isNew ? $("ntInput") : $("replyInput");
+    const tray = isNew ? ntTray : replyTray;
+    const active = () => isNew
+      ? !$("ntModal").hidden && $("ntChat").value === model.chatId
+      : state.thread && thread && state.thread.topic.thread_id === thread.topic.thread_id && !$("composer").hidden;
+    if (!active() || state.auth.can_reply === false) { toast("请打开当前群的回复框或新话题", true); return; }
+    try {
+      if (local) {
+        if (!uploadsAllowed()) { toast("当前未启用发送附件", true); return; }
+        if (tray.items.length >= limits().max_attachments) { toast("附件已达上限", true); return; }
+        const staged = await workspaceRequest("/api/workspace/stage", source);
+        if (!active() || tray.items.length >= limits().max_attachments) {
+          api("/api/upload/" + staged.upload_id, { method: "DELETE", headers: { "Content-Type": "application/json" } }).catch(() => {});
+          toast("输入框已切换或附件已达上限，请重试", true);
+          return;
+        }
+        tray.restoreStaged([staged], "已从工作区引用");
+      } else {
+        const href = feishuWorkspaceHref(source.url) || feishuWorkspaceHref((await workspaceRequest("/api/workspace/preview", source)).url);
+        if (!href || !active()) return;
+        const from = input.selectionStart, to = input.selectionEnd;
+        const text = (from && !/\s/.test(input.value[from - 1]) ? " " : "") + workspaceMarkdown(source.name, href) + " ";
+        if (input.value.length - (to - from) + text.length > input.maxLength) { toast("加入引用后超出消息长度上限", true); return; }
+        input.setRangeText(text, from, to, "end");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      if (state.workspaceModal && state.workspaceModal.mode === "cite") closeWorkspaceModal();
+      input.focus();
+    } catch (e) { toast("引用失败：" + e.message, true); }
+  }
+
+  function workspaceNavigationURL(href) {
+    if (!state.status?.mock || !feishuWorkspaceHref(href)) return href;
+    const u = new URL(href);
+    if (u.hostname !== "mock.feishu.cn" && u.hostname !== "example.feishu.cn") return href;
+    const match = /^\/(?:drive\/)?(wiki\/space|wiki|folder|file|docs?|docx|sheets|bitable|base|slides|mindnotes|minutes)\/([A-Za-z0-9_-]+)/.exec(u.pathname);
+    if (!match) return href;
+    const kind = { "wiki/space": "space", docs: "doc", sheets: "sheet", base: "bitable", mindnotes: "mindnote" }[match[1]] || match[1];
+    return "/api/mock/workspace/" + kind + "/" + match[2];
+  }
+  function openWorkspacePreview(source) {
+    const href = feishuWorkspaceHref(source.url);
+    if (href) { window.open(workspaceNavigationURL(href), "_blank", "noopener,noreferrer"); return; }
+    const win = window.open("", "_blank");
+    if (!win) { toast("请允许此页面打开预览窗口", true); return; }
+    win.opener = null;
+    win.document.title = "飞书预览";
+    const status = win.document.createElement("p");
+    status.textContent = source.kind === "drive" || source.kind === "doc" || source.kind === "wiki" ? "正在获取飞书链接…" : "正在准备预览…";
+    win.document.body.appendChild(status);
+    workspaceRequest("/api/workspace/preview", source).then((r) => {
+      if (r && r.conflict === "cloud_updated") {
+        if (!win.closed) win.close();
+        openWorkspaceCloudConflict(source, r);
+        return;
+      }
+      const url = feishuWorkspaceHref(r.url);
+      if (!url) throw new Error("飞书未返回有效的预览链接");
+      if (!win.closed) win.location.replace(workspaceNavigationURL(url));
+    }).catch((e) => {
+      if (!win.closed) status.textContent = "预览失败：" + e.message;
+      toast("预览失败：" + e.message, true);
+    });
+  }
+  function workspaceAttachmentSource(a) {
+    const href = feishuWorkspaceHref(a.url);
+    if (href || a.resource_token || a.res_type === "drive") {
+      const type = a.resource_type || (a.res_type === "drive" ? "file" : /\/(wiki|folder)\//.exec(href)?.[1]);
+      return { kind: type === "wiki" ? "wiki" : type === "file" || type === "folder" ? "drive" : "doc", resource_type: type,
+        resource_token: a.resource_token || (a.res_type === "drive" ? a.file_key : ""), url: href, name: a.name, message_id: a.message_id };
+    }
+    if (a.local_id) return { kind: "local_dl", dl_id: a.local_id, name: a.name };
+    if (!a.no_download && a.message_id && a.file_key) return { kind: "im", res_type: a.res_type, message_id: a.message_id, file_key: a.file_key, name: a.name };
+    return null;
+  }
+  function workspaceDownloadSource(i) {
+    const original = state.thread && (state.thread.attachments || []).find((a) => feishuWorkspaceHref(a.url) && dlOf(a)?.id === i.id);
+    if (original) return workspaceAttachmentSource(original);
+    if (i.res_type === "drive") return { kind: "drive", resource_type: "file", resource_token: i.file_key, name: dlDisplayName(i), message_id: i.message_id };
+    if (i.res_type.startsWith("export:")) return { kind: "doc", resource_type: i.res_type.slice(7), resource_token: i.file_key, name: dlDisplayName(i), message_id: i.message_id };
+    if (i.message_id && i.file_key) return { kind: "im", res_type: i.res_type, message_id: i.message_id, file_key: i.file_key, name: dlDisplayName(i) };
+    return { kind: "local_dl", dl_id: i.id, name: dlDisplayName(i) };
+  }
+  function workspaceLinkAttachment(href, name, messageId) {
+    const found = state.thread && (state.thread.attachments || []).find((a) => a.message_id === messageId && a.url === href);
+    return found || { url: href, name, message_id: messageId, kind: "doc" };
+  }
+  function workspaceBubbleAttachment(messageId, key, resType, name, kind, cover) {
+    const found = state.thread && (state.thread.attachments || []).find((a) => a.message_id === messageId && a.file_key === key);
+    return found || { kind, name, message_id: messageId, file_key: key, res_type: resType, cover_key: cover };
+  }
+  function withWorkspaceResource(node, source, getItem, attachment) {
+    if (!source) return;
+    const folder = source.resource_type === "folder" || /\/folder\//.test(source.url || "");
+    node.draggable = true;
+    node.addEventListener("dragstart", (e) => {
+      const chatId = workspaceChat();
+      if (!chatId) { e.preventDefault(); return; }
+      e.stopPropagation();
+      state.workspaceDrag = { chatId, source: { ...source } };
+      if (state.preview) renderTabs();
+      e.dataTransfer.setData("application/x-daidainiao-workspace", JSON.stringify(state.workspaceDrag));
+      e.dataTransfer.effectAllowed = "copy";
+    });
+    node.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const item = getItem && getItem();
+      const entries = item ? fileMenu(item) : [];
+      if (!item && attachment && attachment.res_type) {
+        entries.push(
+          { label: "在文件夹中显示", disabled: true, title: "文件尚未下载" },
+          { label: "右侧内联预览", run: () => openPreview(attachment) },
+          { label: "下载到本地", run: () => { const a = el("a"); a.href = resUrl(attachment, true); a.click(); } },
+        );
+      }
+      if (!folder) entries.push({ label: "转存到工作区…", run: () => openWorkspaceModal(workspaceChat(), "transfer", source) });
+      if (entries.length) showMenu(e.clientX, e.clientY, entries);
+    });
+  }
+  function wireWorkspaceBubble(node, attachment, actionNode = node) {
+    const source = workspaceAttachmentSource(attachment);
+    if (!source) return;
+    actionNode.title = "在飞书中预览 · 右键查看更多操作";
+    actionNode.onclick = (e) => { e.stopPropagation(); openWorkspacePreview(source); };
+    if (actionNode.tagName !== "BUTTON") {
+      actionNode.tabIndex = 0;
+      actionNode.setAttribute("role", "button");
+      actionNode.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); actionNode.click(); }
+      };
+    }
+    withWorkspaceResource(node, source, () => dlOf(attachment), attachment);
+  }
+  let workspaceTabTimer = null;
+  function endWorkspaceDrag() {
+    clearTimeout(workspaceTabTimer);
+    workspaceTabTimer = null;
+    if (!state.workspaceDrag) return;
+    state.workspaceDrag = null;
+    if (state.preview) renderTabs();
+    $("tabWorkspace").classList.remove("ws-drop");
+    document.querySelectorAll(".ws-tree-row.ws-drop").forEach((row) => row.classList.remove("ws-drop"));
+  }
+  $("tabWorkspace").ondragover = (e) => {
+    if (!state.workspaceDrag) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (workspaceTabTimer || state.tab === "workspace") return;
+    $("tabWorkspace").classList.add("ws-drop");
+    workspaceTabTimer = setTimeout(() => {
+      workspaceTabTimer = null;
+      $("tabWorkspace").classList.remove("ws-drop");
+      if (state.workspaceDrag) setTab("workspace");
+    }, 300);
+  };
+  $("tabWorkspace").ondragleave = () => {
+    clearTimeout(workspaceTabTimer);
+    workspaceTabTimer = null;
+    $("tabWorkspace").classList.remove("ws-drop");
+  };
+  document.addEventListener("dragend", endWorkspaceDrag);
+  document.addEventListener("drop", endWorkspaceDrag);
+  $("tabWorkspace").onclick = () => setTab("workspace");
+  $("btnWorkspace").onclick = () => openWorkspaceModal(workspaceChat());
+  $("workspaceClose").onclick = closeWorkspaceModal;
+  $("workspacePick").onclick = pickWorkspaceDirectory;
+  $("workspaceBindLink").onclick = () => bindWorkspaceFromLink().catch(() => {});
+  $("workspaceAttach").onchange = () => {
+    const modal = state.workspaceModal;
+    if (!modal || modal.mode !== "settings") return;
+    persistWorkspace(modal, modal.items, $("workspaceAttach").checked, true).catch(() => {});
+  };
+  $("wsTabBtnLocal").onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, "local");
+  $("wsTabBtnDrive").onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, "drive");
+  $("wsTabBtnWiki").onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, "wiki");
+  $("workspaceDriveFilter").oninput = () => state.workspaceModal && browseWorkspaceDrive(state.workspaceModal, state.workspaceModal.drive.token, false);
+  $("workspaceWikiFilter").oninput = () => state.workspaceModal && browseWorkspaceWiki(state.workspaceModal, state.workspaceModal.wiki.spaceId, state.workspaceModal.wiki.node, false);
+  $("workspacePathForm").onsubmit = (e) => {
+    e.preventDefault();
+    const modal = state.workspaceModal;
+    if (modal) browseWorkspaceLocal(modal, $("workspacePathInput").value.trim());
+  };
+  $("workspacePathBind").onclick = () => {
+    const modal = state.workspaceModal, path = $("workspacePathInput").value.trim();
+    if (modal && path) bindWorkspaceItem(modal, { kind: "local_dir", local_path: path }, false).catch(() => {});
+  };
+  $("workspaceModal").onclick = (e) => { if (e.target === $("workspaceModal")) closeWorkspaceModal(); };
+  let workspaceConflict = null;
+  function closeWorkspaceConflict() {
+    $("wsConflictModal").hidden = true;
+    workspaceConflict = null;
+    $("wsConflictSync").disabled = false;
+  }
+  function openConflictDocument(info) {
+    const href = feishuWorkspaceHref(info && info.source_url);
+    if (!href) { toast("没有可用的飞书文档链接", true); return; }
+    window.open(workspaceNavigationURL(href), "_blank", "noopener,noreferrer");
+  }
+  function refreshWorkspaceParentBranch(source) {
+    const model = source && source.chat_id && state.workspaces.get(source.chat_id);
+    if (!model || !model.data) return;
+    const item = model.data.items.find((it) => it.id === source.item_id);
+    if (!item) return;
+    const rel = String(source.rel_path || "").replace(/\\/g, "/");
+    const slash = rel.lastIndexOf("/");
+    const parentRel = slash >= 0 ? rel.slice(0, slash) : "";
+    const branch = model.tree.get(JSON.stringify([item.id, parentRel]));
+    if (!branch) return;
+    const node = parentRel ? { rel_path: parentRel } : { root: true };
+    if (branch.expanded) loadWorkspaceBranch(model, item, node, branch);
+    else { branch.items = null; updateWorkspaceViews(model); }
+  }
+  function openWorkspaceCloudConflict(source, info) {
+    workspaceConflict = { source, info };
+    $("wsConflictText").textContent = "文件在本地未修改，但原飞书文档已有新版本。";
+    $("wsConflictName").textContent = info.source_name ? "文档：" + info.source_name : "";
+    $("wsConflictSync").disabled = false;
+    $("wsConflictModal").hidden = false;
+    $("wsConflictOpen").focus();
+  }
+  $("wsConflictOpen").onclick = () => {
+    const current = workspaceConflict;
+    if (!current) return;
+    closeWorkspaceConflict();
+    openConflictDocument(current.info);
+  };
+  $("wsConflictSync").onclick = async () => {
+    const current = workspaceConflict;
+    if (!current || !current.source) return;
+    const button = $("wsConflictSync");
+    button.disabled = true;
+    const win = window.open("", "_blank");
+    if (win) win.opener = null;
+    try {
+      const r = await workspaceRequest("/api/workspace/sync_local", {
+        chat_id: current.source.chat_id, item_id: current.source.item_id, rel_path: current.source.rel_path,
+      });
+      refreshWorkspaceParentBranch(current.source);
+      const href = feishuWorkspaceHref((r && r.url) || (current.info && current.info.source_url));
+      closeWorkspaceConflict();
+      toast("已同步飞书最新版并覆盖本地文件");
+      if (win && href && !win.closed) win.location.replace(workspaceNavigationURL(href));
+      else if (win && !win.closed) win.close();
+    } catch (e) {
+      if (win && !win.closed) win.close();
+      toast("同步失败：" + e.message, true);
+      button.disabled = false;
+    }
+  };
+  $("wsConflictClose").onclick = closeWorkspaceConflict;
+  $("wsConflictModal").addEventListener("click", (e) => { if (e.target === $("wsConflictModal")) closeWorkspaceConflict(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("wsConflictModal").hidden) { closeWorkspaceConflict(); return; }
+    if (!$("workspaceModal").hidden) closeWorkspaceModal();
   });
+  $("workspaceClearCache").onclick = async () => {
+    if (!window.confirm("清理后，已打开的缓存文件链接将失效。继续清理？")) return;
+    const modal = state.workspaceModal, button = $("workspaceClearCache");
+    button.disabled = true;
+    try {
+      const r = await workspaceRequest("/api/workspace/preview_cache", {}, "DELETE");
+      toast(r.failed ? "已清理本地索引，" + r.failed + " 个云端文件删除失败" : "已清理 " + r.deleted + " 个飞书预览缓存", !!r.failed);
+    } catch (e) {
+      if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
+    } finally { button.disabled = false; }
+  };
+  $("replyWorkspace").onchange = $("ntWorkspace").onchange = (e) => { e.target.dataset.changed = "1"; };
+  $("ntWorkspaceRef").onclick = () => openWorkspaceModal($("ntChat").value, "cite");
 
   // ---------- wiring ----------
   $("btnNotify").onclick = () => openNotifyModal();
@@ -2791,47 +3680,74 @@
 
   async function init() {
     renderList();
-    try {
-      state.status = await api("/api/status");
-      state.dl.opener = !!state.status.opener;
-      state.dl.docker = !!state.status.docker;
-      state.dl.enabled = state.status.downloads !== false;
-      if (state.status.download_dir) state.dl.dir = state.status.download_dir;
-      $("modeBadge").hidden = !state.status.mock;
-      state.auth = await api("/api/auth/status");
+    renderThread();
+    const reportError = (e) => {
+      state.startupError = e;
+      renderListKeepScroll();
+    };
+    const status = api("/api/status").then((r) => {
+      state.status = r;
+      state.dl.opener = !!r.opener;
+      state.dl.docker = !!r.docker;
+      state.dl.enabled = r.downloads !== false;
+      if (r.download_dir) state.dl.dir = r.download_dir;
+      $("modeBadge").hidden = !r.mock;
+      renderListKeepScroll();
+      if (!state.auth.logged_in) renderThread();
+    }).catch(reportError);
+    const selection = api("/api/selection").then((r) => {
+      state.selection = r.chat_ids || [];
+    }).catch(reportError).finally(() => {
+      state.loadedSelection = true;
+      renderListKeepScroll();
+      if (!state.auth.logged_in) renderThread();
+    });
+    const auth = api("/api/auth/status").then(async (r) => {
+      state.auth = r;
       renderAuth();
-      const sel = await api("/api/selection");
-      state.selection = sel.chat_ids || [];
-      if (state.auth.logged_in) {
-        try {
-          const cr = await api("/api/chats");
-          state.chats = cr.chats || [];
-        } catch (_) {}
+      renderListKeepScroll();
+      if (!r.logged_in) {
+        startingTopics = false;
+        renderThread();
+        return;
       }
+      loadChats(true).catch(() => {});
       try {
-        state.notify = await api("/api/notifications/settings");
-      } catch (_) {}
-      try {
-        state.readState = await api("/api/read_state");
-        if (!state.readState || !state.readState.threads) {
-          state.readState = { initialized: false, threads: {} };
+        if (state.listTab === "group") await selection;
+        if (state.auth !== r) return;
+        lastTopicPoll = Date.now();
+        const syncing = refreshTopicListSilently({ cachedFirst: true });
+        if (state.listTab === "group" && !state.selection.length && r.configured) openModal();
+        const link = /#t=([^&]+)/.exec(location.hash);
+        if (link && !state.active) {
+          selectTopic(decodeURIComponent(link[1])).finally(startAutoRefresh);
+        } else {
+          startAutoRefresh();
         }
-      } catch (_) {}
-    } catch (e) { $("banner").appendChild(banner("err", "无法连接后端：" + e.message)); }
-    state.loadedSelection = true;
-    renderList(); renderThread();
-    if (!state.auth.logged_in) return;
-    if (state.listTab === "my") {
-      await loadMyTopics(false);
-      if (state.selection.length) loadTopics(false);
-    } else {
-      if (!state.selection.length && state.status && (state.status.configured)) { openModal(); return; }
-      if (state.selection.length) await loadTopics(false);
-      loadMyTopics(false);
-    }
-    const m = /#t=([^&]+)/.exec(location.hash);
-    if (m) await selectTopic(decodeURIComponent(m[1]));
-    startAutoRefresh();
+        await syncing;
+      } finally {
+        startingTopics = false;
+        if (checkInitReadState()) renderListKeepScroll();
+      }
+    }).catch(reportError);
+    const notify = api("/api/notifications/settings").then((r) => { state.notify = r; }).catch(() => {});
+    const readState = api("/api/read_state").then((r) => {
+      const threads = state.readState.threads;
+      const remote = r.threads || {};
+      if (r.initialized && state.auth.logged_in) {
+        for (const [id, time] of Object.entries(threads)) {
+          if (time > (remote[id] || 0)) saveTopicRead(id, time);
+        }
+      }
+      for (const [id, time] of Object.entries(remote)) {
+        threads[id] = Math.max(threads[id] || 0, time);
+      }
+      state.readState.initialized ||= r.initialized;
+      readStateReady = true;
+      checkInitReadState();
+      renderListKeepScroll();
+    }).catch(() => {});
+    await Promise.all([status, auth, selection, notify, readState]);
   }
   init();
 })();

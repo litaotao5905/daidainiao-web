@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="网页呆呆鸟">
-<link rel="stylesheet" href="style.css?v=1.9.16">
+<link rel="stylesheet" href="style.css?v=workspace-links">
 </head>
 <body>
 <header class="topbar">
@@ -49,8 +49,11 @@
 
   <section id="colChat" class="col">
     <div id="chatHead" class="col-head chat-head" hidden>
-      <div class="chat-title" id="chatTitle"></div>
-      <div class="chat-sub" id="chatSub"></div>
+      <div class="chat-head-copy">
+        <div class="chat-title" id="chatTitle"></div>
+        <div class="chat-sub" id="chatSub"></div>
+      </div>
+      <button id="btnWorkspace" class="btn" type="button">工作区 <span id="workspaceCount" class="count"></span></button>
     </div>
     <div id="chatWarn"></div>
     <div id="messages" class="scroll">
@@ -70,6 +73,7 @@
       </div>
       <div class="composer-foot">
         <div class="composer-hint" id="replyHint">以你本人的身份回复到该话题 · 可粘贴/拖拽图片与文件</div>
+        <label class="ws-check"><input id="replyWorkspace" type="checkbox" disabled> 附带群工作区</label>
       </div>
     </form>
   </section>
@@ -78,6 +82,7 @@
   <aside id="colFiles" class="col">
     <div id="filesHead" class="col-head">
       <div id="filesTabs" class="tabs" role="tablist">
+        <button id="tabWorkspace" class="tab" role="tab" aria-selected="false">工作区</button>
         <button id="tabFiles" class="tab on" role="tab" aria-selected="true">飞书在线文档 <span id="filesCount" class="count"></span></button>
         <button id="tabDl" class="tab" role="tab" aria-selected="false">文件 <span id="dlCount" class="count"></span></button>
       </div>
@@ -126,6 +131,10 @@
       <input id="ntFile" type="file" multiple hidden>
       <textarea id="ntInput" rows="4" maxlength="10000" placeholder="输入话题内容…（Ctrl/⌘+Enter 发送）"></textarea>
     </div>
+    <div class="nt-row ws-compose-options">
+      <label class="ws-check"><input id="ntWorkspace" type="checkbox" disabled> 附带群工作区</label>
+      <button id="ntWorkspaceRef" type="button" class="btn sm">引用工作区</button>
+    </div>
     <div class="modal-foot">
       <span class="composer-hint" id="ntHint"></span>
       <div class="spacer"></div>
@@ -133,6 +142,64 @@
       <button id="ntSend" type="submit" class="btn primary">发送</button>
     </div>
   </form>
+</div>
+<div id="workspaceModal" class="modal" hidden>
+  <section class="modal-card ws-modal" role="dialog" aria-modal="true" aria-labelledby="workspaceTitle">
+    <div class="modal-head">
+      <h2 id="workspaceTitle">群工作区</h2>
+      <button id="workspaceClose" type="button" class="btn icon" aria-label="关闭">✕</button>
+    </div>
+    <div id="workspaceSettings">
+      <div id="workspaceBindings" class="ws-list"></div>
+      <label class="ws-check"><input id="workspaceAttach" type="checkbox"> 发消息时默认附带群工作区路径</label>
+      <section class="ws-bind-panel" aria-label="绑定新工作区">
+        <div class="ws-quick-link">
+          <input id="workspaceLinkInput" type="url" placeholder="粘贴飞书知识库或云盘文件夹链接…" aria-label="飞书链接">
+          <button id="workspaceBindLink" type="button" class="btn sm primary">识别并绑定</button>
+        </div>
+        <div class="ws-tabs" role="tablist" aria-label="绑定方式">
+          <button id="wsTabBtnLocal" type="button" class="ws-tab on" role="tab" aria-selected="true">电脑本地文件夹</button>
+          <button id="wsTabBtnDrive" type="button" class="ws-tab" role="tab" aria-selected="false">飞书云盘</button>
+          <button id="wsTabBtnWiki" type="button" class="ws-tab" role="tab" aria-selected="false">飞书知识库</button>
+        </div>
+        <div id="wsTabLocal" class="ws-tab-panel">
+          <button id="workspacePick" type="button" class="btn primary ws-pick-btn">📂 打开电脑文件夹选择器</button>
+          <p id="workspacePickHint" class="hint ws-pick-hint" hidden></p>
+          <div id="workspaceLocalPlaces" class="ws-places" role="toolbar" aria-label="快捷入口"></div>
+          <nav id="workspaceLocalCrumbs" class="ws-crumbs" aria-label="路径"></nav>
+          <div id="workspaceLocalList" class="ws-list ws-browser-list"></div>
+          <button id="workspaceBindLocalDir" type="button" class="btn sm ws-bind-current" hidden>绑定当前目录</button>
+          <details class="ws-path-fallback">
+            <summary>输入路径…</summary>
+            <form id="workspacePathForm" class="ws-path-form">
+              <input id="workspacePathInput" type="text" placeholder="~/Desktop/项目 或完整路径" aria-label="文件夹路径">
+              <button type="submit" class="btn sm">前往</button>
+              <button id="workspacePathBind" type="button" class="btn sm">绑定此路径</button>
+            </form>
+          </details>
+        </div>
+        <div id="wsTabDrive" class="ws-tab-panel" hidden>
+          <input id="workspaceDriveFilter" type="search" placeholder="筛选文件夹…" aria-label="筛选云盘文件夹">
+          <nav id="workspaceDriveCrumbs" class="ws-crumbs" aria-label="云盘路径"></nav>
+          <div id="workspaceDriveList" class="ws-list ws-browser-list"></div>
+          <button id="workspaceDriveMore" type="button" class="btn sm" hidden>加载更多</button>
+          <button id="workspaceBindDriveDir" type="button" class="btn sm ws-bind-current" hidden>绑定当前文件夹</button>
+        </div>
+        <div id="wsTabWiki" class="ws-tab-panel" hidden>
+          <input id="workspaceWikiFilter" type="search" placeholder="筛选知识库或节点…" aria-label="筛选知识库">
+          <nav id="workspaceWikiCrumbs" class="ws-crumbs" aria-label="知识库路径"></nav>
+          <div id="workspaceWikiList" class="ws-list ws-browser-list"></div>
+          <button id="workspaceWikiMore" type="button" class="btn sm" hidden>加载更多</button>
+          <button id="workspaceBindWikiDir" type="button" class="btn sm ws-bind-current" hidden>绑定当前节点</button>
+        </div>
+      </section>
+    </div>
+    <div id="workspacePickerTree" class="ws-list" hidden></div>
+    <div id="workspaceError" class="hint" role="status"></div>
+    <div id="workspaceActions" class="modal-foot">
+      <button id="workspaceClearCache" type="button" class="btn">清理飞书预览缓存</button>
+    </div>
+  </section>
 </div>
 <div id="notifyModal" class="modal" hidden>
   <div class="modal-card notify-card" role="dialog" aria-modal="true" aria-labelledby="notifyTitle">
@@ -204,7 +271,21 @@
     </div>
   </div>
 </div>
-<script src="app.js?v=1.9.16"></script>
+<div id="wsConflictModal" class="modal" hidden>
+  <div class="modal-card ws-conflict" role="dialog" aria-modal="true" aria-labelledby="wsConflictTitle">
+    <div class="modal-head">
+      <h2 id="wsConflictTitle">原飞书文档已有新版本</h2>
+      <button id="wsConflictClose" type="button" class="btn icon" aria-label="关闭">✕</button>
+    </div>
+    <p id="wsConflictText">文件在本地未修改，但原飞书文档已有新版本。</p>
+    <p id="wsConflictName" class="hint"></p>
+    <div class="modal-foot">
+      <button id="wsConflictOpen" type="button" class="btn">打开最新飞书文档</button>
+      <button id="wsConflictSync" type="button" class="btn primary">同步最新版覆盖本地</button>
+    </div>
+  </div>
+</div>
+<script src="app.js?v=workspace-links"></script>
 <script src="pwa.js"></script>
 </body>
 </html>

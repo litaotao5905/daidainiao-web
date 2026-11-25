@@ -80,7 +80,7 @@ func (s *Server) checkCSRF(r *http.Request) bool {
 // localOnly gates actions that launch local programs: loopback client, a
 // localhost Host header (ALLOW_ANY_HOST does not relax this) and the CSRF token.
 func (s *Server) localOnly(w http.ResponseWriter, r *http.Request) bool {
-	if (!isLoopbackAddr(r.RemoteAddr) && !s.docker) || !isLocalHostHeader(r.Host) {
+	if !s.localClient(r) {
 		writeJSON(w, http.StatusForbidden, apiError{Error: "只允许在本机通过 localhost 访问此功能"})
 		return false
 	}
@@ -89,6 +89,10 @@ func (s *Server) localOnly(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (s *Server) localClient(r *http.Request) bool {
+	return (s.docker || isLoopbackAddr(r.RemoteAddr)) && isLocalHostHeader(r.Host)
 }
 
 func (s *Server) handleCSRF(w http.ResponseWriter, r *http.Request) {

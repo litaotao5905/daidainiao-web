@@ -26,6 +26,17 @@ type API interface {
 	DrivePermissions(context.Context, string, string) (*DrivePermissionSnapshot, error)
 	DriveClosePrivate(context.Context, string, string) error
 	DriveList(context.Context, string, string) (*DriveListPage, error)
+	DriveSearchObjects(ctx context.Context, query string, docsTypes []string, offset, count int) (*DriveSearchPage, error)
+	WikiSpaces(ctx context.Context, pageToken string) (*WikiSpacePage, error)
+	WikiNodes(ctx context.Context, spaceID, parentNodeToken, pageToken string) (*WikiNodePage, error)
+	WikiSearchNodes(ctx context.Context, query, spaceID, pageToken string) (*WikiSearchPage, error)
+	WikiNodeInfo(ctx context.Context, token string) (*WikiNodeDetail, error)
+	WikiMoveDocToSpace(ctx context.Context, spaceID, parentWikiToken, objType, objToken string) (*WikiMoveResult, error)
+	DriveCopyFile(ctx context.Context, fileToken, docType, folderToken, name string) (*DriveResource, error)
+	DriveEnsurePrivateSubfolder(ctx context.Context, subName string) (string, error)
+	DriveDeleteFile(ctx context.Context, token, docType string) error
+	DriveRootFolder(ctx context.Context) (string, error)
+	DriveUploadToFolder(ctx context.Context, folderToken, name string, data io.Reader, size int64) (string, error)
 	WikiResolve(context.Context, string) (*DriveResource, error)
 	DriveMetas(context.Context, []DriveRef) (map[string]DriveResource, error)
 	ListChats(ctx context.Context, pageToken string) (*ChatPage, error)
@@ -163,11 +174,11 @@ func NewFeishuClient(base, appID, appSecret string, auth *Auth, resourceAuth str
 		resourceAuth = "auto"
 	}
 	return &FeishuClient{
-		base:      strings.TrimRight(base, "/"),
-		appID:     appID,
-		appSecret: appSecret,
-		auth:      auth,
-		resAuth:   resourceAuth,
+		base:         strings.TrimRight(base, "/"),
+		appID:        appID,
+		appSecret:    appSecret,
+		auth:         auth,
+		resAuth:      resourceAuth,
 		hc:           &http.Client{},
 		gap:          25 * time.Millisecond, // ~40 req/s, below the documented 50/s
 		folderTokens: map[string]string{},
@@ -735,14 +746,25 @@ func (c *FeishuClient) rootFolder(ctx context.Context) (string, error) {
 }
 
 func (c *FeishuClient) driveUploadToFolder(ctx context.Context, folder, name string, data []byte) (string, error) {
-	if len(data) <= DriveMaxBytes {
+	return c.DriveUploadToFolder(ctx, folder, name, bytes.NewReader(data), int64(len(data)))
+}
+
+func (c *FeishuClient) DriveUploadToFolder(ctx context.Context, folder, name string, data io.Reader, size int64) (string, error) {
+	if size < 0 {
+		return "", fmt.Errorf("上传文件大小无效")
+	}
+	if size <= DriveMaxBytes {
+		content := make([]byte, int(size))
+		if _, err := io.ReadFull(data, content); err != nil {
+			return "", err
+		}
 		fields := [][2]string{
 			{"file_name", name},
 			{"parent_type", "explorer"},
 			{"parent_node", folder},
-			{"size", strconv.Itoa(len(data))},
+			{"size", strconv.FormatInt(size, 10)},
 		}
-		body, ctype, err := multipartBody(fields, "file", name, data)
+		body, ctype, err := multipartBody(fields, "file", name, content)
 		if err != nil {
 			return "", err
 		}
@@ -762,7 +784,7 @@ func (c *FeishuClient) driveUploadToFolder(ctx context.Context, folder, name str
 		"file_name":   name,
 		"parent_type": "explorer",
 		"parent_node": folder,
-		"size":        len(data),
+		"size":        size,
 	})
 	var prep struct {
 		UploadID  string `json:"upload_id"`
@@ -772,15 +794,20 @@ func (c *FeishuClient) driveUploadToFolder(ctx context.Context, folder, name str
 	if err := c.callReq(ctx, idUser, http.MethodPost, "/drive/v1/files/upload_prepare", nil, prepBody, false, &prep); err != nil {
 		return "", err
 	}
-	if prep.UploadID == "" || prep.BlockSize <= 0 {
+	if prep.UploadID == "" || prep.BlockSize <= 0 || prep.BlockSize > DriveMaxBytes ||
+		int64(prep.BlockNum) != 1+(size-1)/int64(prep.BlockSize) {
 		return "", &FeishuError{Msg: "分片上传初始化失败"}
 	}
-	for seq, off := 0, 0; off < len(data); seq, off = seq+1, off+prep.BlockSize {
-		end := off + prep.BlockSize
-		if end > len(data) {
-			end = len(data)
+	buf := make([]byte, prep.BlockSize)
+	for seq, remaining := 0, size; remaining > 0; seq++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
-		chunk := data[off:end]
+		chunk := buf[:min(remaining, int64(len(buf)))]
+		if _, err := io.ReadFull(data, chunk); err != nil {
+			return "", err
+		}
+		remaining -= int64(len(chunk))
 		fields := [][2]string{
 			{"upload_id", prep.UploadID},
 			{"seq", strconv.Itoa(seq)},
@@ -808,6 +835,10 @@ func (c *FeishuClient) driveUploadToFolder(ctx context.Context, folder, name str
 		return "", &FeishuError{Msg: "分片上传完成但未返回 file_token"}
 	}
 	return fin.FileToken, nil
+}
+
+func (c *FeishuClient) DriveRootFolder(ctx context.Context) (string, error) {
+	return c.rootFolder(ctx)
 }
 
 // DriveUploadToTopic uploads a file into "网页呆呆鸟/<topicFolder>" in the

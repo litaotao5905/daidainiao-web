@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	ttlChats    = 10 * time.Minute
+	ttlChats    = 30 * time.Minute
 	ttlRefs     = 10 * time.Second
 	ttlThread   = 2 * time.Minute
 	ttlUser     = 24 * time.Hour
@@ -22,6 +22,7 @@ const (
 	userFailTL  = 10 * time.Minute
 	ttlForward  = 24 * time.Hour // merged-forward contents never change
 	fwFailTL    = 2 * time.Minute
+	cardRetry   = 30 * time.Minute
 	maxFwdDepth = 4
 )
 
@@ -32,10 +33,16 @@ type Service struct {
 	cfg   Config
 	auth  *Auth
 
+	workspaceMu sync.Mutex
+	previewMu   sync.Mutex
+	linksMu     sync.Mutex
+
 	fileMu          sync.Mutex
 	fileJobs        map[string]*topicFileRecord
 	materialNameSem chan struct{}
 	locks           sync.Map // key -> *sync.Mutex
+	topicScans      sync.Map // topicScanKey -> *topicScan
+	cardFailures    sync.Map // scoped message key -> retry time
 
 	uMu       sync.Mutex
 	uFailTill time.Time
@@ -51,7 +58,7 @@ type Service struct {
 	qOnce sync.Once
 	q     *queueStore
 
-	notify *NotifyManager
+	notify    *NotifyManager
 	readState *ReadStateManager
 }
 
@@ -150,6 +157,36 @@ func (s *Service) NotifyTaskComplete(ctx context.Context, threadID, chatName, to
 // one user must never be served to another.
 func (s *Service) k(base string) string { return base + "@" + s.auth.UserID() }
 
+type topicUserKey struct{}
+
+func (s *Service) userFor(ctx context.Context) *UserInfo {
+	if user, ok := ctx.Value(topicUserKey{}).(*UserInfo); ok {
+		return user
+	}
+	return s.auth.Status().User
+}
+
+func (s *Service) keyFor(ctx context.Context, base string) string {
+	if user := s.userFor(ctx); user != nil {
+		return base + "@" + user.OpenID
+	}
+	return base + "@"
+}
+
+func (s *Service) topicContext(ctx context.Context) (context.Context, error) {
+	if _, ok := ctx.Value(topicUserKey{}).(*UserInfo); ok {
+		return ctx, nil
+	}
+	user := s.auth.Status().User
+	if user == nil {
+		return nil, ErrLoginRequired
+	}
+	// Retain the same account for cache keys and Feishu authentication even
+	// while the shared scan outlives the HTTP request that started it.
+	ctx = context.WithValue(ctx, workspaceUserKey{}, user.OpenID)
+	return context.WithValue(ctx, topicUserKey{}, user), nil
+}
+
 func (s *Service) requireLogin() error {
 	if !s.auth.LoggedIn() {
 		return ErrLoginRequired
@@ -166,11 +203,25 @@ func (s *Service) lock(key string) func() {
 
 // ---------- chats ----------
 
+func (s *Service) ChatsCached(ctx context.Context) ([]Chat, bool, error) {
+	ctx, err := s.topicContext(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	var chats []Chat
+	_, ok := s.cache.Get(s.keyFor(ctx, "chats"), &chats)
+	if !ok || chats == nil {
+		chats = []Chat{}
+	}
+	return chats, ok, nil
+}
+
 func (s *Service) Chats(ctx context.Context, refresh bool) ([]Chat, error) {
-	if err := s.requireLogin(); err != nil {
+	ctx, err := s.topicContext(ctx)
+	if err != nil {
 		return nil, err
 	}
-	key := s.k("chats")
+	key := s.keyFor(ctx, "chats")
 	var cached []Chat
 	age, ok := s.cache.Get(key, &cached)
 	if ok && !refresh && age < ttlChats {
@@ -204,15 +255,19 @@ func (s *Service) Chats(ctx context.Context, refresh bool) ([]Chat, error) {
 }
 
 func (s *Service) chatName(ctx context.Context, chatID string) string {
-	var cached []Chat
-	if _, ok := s.cache.Get(s.k("chats"), &cached); !ok {
+	cached, ok, _ := s.ChatsCached(ctx)
+	if !ok {
 		cs, err := s.Chats(ctx, false)
 		if err != nil {
 			return chatID
 		}
 		cached = cs
 	}
-	for _, c := range cached {
+	return cachedChatName(cached, chatID)
+}
+
+func cachedChatName(chats []Chat, chatID string) string {
+	for _, c := range chats {
 		if c.ChatID == chatID {
 			return c.Name
 		}
@@ -235,7 +290,7 @@ func isRoot(m RawMessage) bool {
 // chat container only returns the root message of each thread (the ones that
 // carry a thread_id), so we scan recent history for those.
 func (s *Service) threadRefs(ctx context.Context, chatID string, refresh bool) ([]threadRef, error) {
-	key := s.k("threadrefs:" + chatID)
+	key := s.keyFor(ctx, "threadrefs:"+chatID)
 	var cached []threadRef
 	age, ok := s.cache.Get(key, &cached)
 	if ok && !refresh && age < ttlRefs {
@@ -313,25 +368,20 @@ func msgTime(m RawMessage) int64 {
 	return n
 }
 
-func hasCardPlaceholder(ms []RawMessage) bool {
-	for _, m := range ms {
-		if m.MsgType == "interactive" && isCardPlaceholder(m.Body.Content) {
-			return true
-		}
-	}
-	return false
-}
-
 // threadMessages returns all messages of a thread in chronological order.
 func (s *Service) threadMessages(ctx context.Context, threadID string, root *RawMessage, refresh bool) ([]RawMessage, error) {
-	key := s.k("thread:" + threadID)
+	return s.loadThreadMessages(ctx, threadID, root, refresh, false)
+}
+
+func (s *Service) loadThreadMessages(ctx context.Context, threadID string, root *RawMessage, refresh, detail bool) ([]RawMessage, error) {
+	key := s.keyFor(ctx, "thread:"+threadID)
 	var cached []RawMessage
 	age, ok := s.cache.Get(key, &cached)
-	if ok && !refresh && age < ttlThread && !hasCardPlaceholder(cached) {
+	if ok && !refresh && age < ttlThread && (!detail || !s.hasRepairableCardPlaceholder(ctx, cached)) {
 		return s.attachRoot(key, cached, root), nil
 	}
 	defer s.lock(key)()
-	if age, ok = s.cache.Get(key, &cached); ok && !refresh && age < ttlThread && !hasCardPlaceholder(cached) {
+	if age, ok = s.cache.Get(key, &cached); ok && !refresh && age < ttlThread && (!detail || !s.hasRepairableCardPlaceholder(ctx, cached)) {
 		return s.attachRoot(key, cached, root), nil
 	}
 
@@ -583,13 +633,13 @@ func shortID(id string) string {
 
 // resolveUsers returns user info for the given open_ids. Missing permission
 // or unknown users fall back to hint names (from @mentions), never failing.
-func (s *Service) resolveUsers(ctx context.Context, ids []string, hints map[string]string) (map[string]User, []string) {
+func (s *Service) resolveUsers(ctx context.Context, ids []string, hints map[string]string, localOnly bool) (map[string]User, []string) {
 	res := map[string]User{}
 	var missing []string
 	seen := map[string]bool{}
-	if st := s.auth.Status(); st.User != nil && st.User.OpenID != "" && st.User.Name != "" {
-		res[st.User.OpenID] = User{OpenID: st.User.OpenID, Name: st.User.Name, Avatar: st.User.AvatarURL}
-		seen[st.User.OpenID] = true
+	if user := s.userFor(ctx); user != nil && user.OpenID != "" && user.Name != "" {
+		res[user.OpenID] = User{OpenID: user.OpenID, Name: user.Name, Avatar: user.AvatarURL}
+		seen[user.OpenID] = true
 	}
 	for _, id := range ids {
 		if id == "" || seen[id] {
@@ -597,14 +647,14 @@ func (s *Service) resolveUsers(ctx context.Context, ids []string, hints map[stri
 		}
 		seen[id] = true
 		var u User
-		if age, ok := s.cache.Get("user:"+id, &u); ok && age < ttlUser && u.Name != "" {
+		if age, ok := s.cache.Get("user:"+id, &u); ok && (localOnly || age < ttlUser) && u.Name != "" {
 			res[id] = u
 			continue
 		}
 		missing = append(missing, id)
 	}
 	var warns []string
-	if len(missing) > 0 {
+	if !localOnly && len(missing) > 0 {
 		s.uMu.Lock()
 		failing := time.Now().Before(s.uFailTill)
 		failMsg := s.uFailMsg
@@ -730,11 +780,16 @@ func (s *Service) chatURL(chatID string) string {
 }
 
 func (s *Service) parseOpts() ParseOpts {
+	return s.parseOptsFor(context.Background())
+}
+
+func (s *Service) parseOptsFor(ctx context.Context) ParseOpts {
+	chatKey := s.keyFor(ctx, "chats")
 	return ParseOpts{
 		AppLink: s.appLink(),
 		ChatName: func(id string) string {
 			var cached []Chat
-			if _, ok := s.cache.Get(s.k("chats"), &cached); ok {
+			if _, ok := s.cache.Get(chatKey, &cached); ok {
 				for _, c := range cached {
 					if c.ChatID == id {
 						return c.Name
@@ -754,11 +809,14 @@ func (s *Service) parseOpts() ParseOpts {
 }
 
 // forwardSubs fetches the sub-messages of a merge_forward message.
-func (s *Service) forwardSubs(ctx context.Context, m RawMessage) ([]RawMessage, error) {
-	key := s.k("fwd:" + m.MessageID)
+func (s *Service) forwardSubs(ctx context.Context, m RawMessage, localOnly bool) ([]RawMessage, error) {
+	key := s.keyFor(ctx, "fwd:"+m.MessageID)
 	var cached []RawMessage
-	if age, ok := s.cache.Get(key, &cached); ok && age < ttlForward {
+	if age, ok := s.cache.Get(key, &cached); ok && (localOnly || age < ttlForward) {
 		return cached, nil
+	}
+	if localOnly {
+		return nil, nil
 	}
 	s.fwMu.Lock()
 	if f, ok := s.fwFail[m.MessageID]; ok && time.Since(f.at) < fwFailTL {
@@ -907,16 +965,81 @@ func (s *Service) busyStateFromRaws(chatName string, raws []RawMessage, lastSent
 	return s.topicBusyState(chatName, s.renderRecentForBusy(raws), lastSentMs, now)
 }
 
+type renderMode uint8
+
+const (
+	renderSummary renderMode = iota
+	renderDetail
+	renderLocal
+)
+
+func isPlaceholderCardMessage(m RawMessage) bool {
+	return m.MessageID != "" && m.MsgType == "interactive" && !m.Deleted && isCardPlaceholder(m.Body.Content)
+}
+
+func (s *Service) cardCoolingDown(key string) bool {
+	until, ok := s.cardFailures.Load(key)
+	if !ok || time.Now().Before(until.(time.Time)) {
+		return ok
+	}
+	s.cardFailures.CompareAndDelete(key, until)
+	return false
+}
+
+func (s *Service) hasRepairableCardPlaceholder(ctx context.Context, raws []RawMessage) bool {
+	for _, m := range raws {
+		if !isPlaceholderCardMessage(m) {
+			continue
+		}
+		key := s.keyFor(ctx, "card:"+m.MessageID)
+		var content string
+		if _, ok := s.cache.Get(key, &content); !ok && !s.cardCoolingDown(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) cardContent(ctx context.Context, m RawMessage, repair bool) string {
+	key := s.keyFor(ctx, "card:"+m.MessageID)
+	var content string
+	if _, ok := s.cache.Get(key, &content); ok {
+		return content
+	}
+	if !repair || s.cardCoolingDown(key) {
+		return m.Body.Content
+	}
+	defer s.lock(key)()
+	if _, ok := s.cache.Get(key, &content); ok {
+		return content
+	}
+	if s.cardCoolingDown(key) || ctx.Err() != nil {
+		return m.Body.Content
+	}
+	items, err := s.api.GetMessage(ctx, m.MessageID)
+	if err == nil {
+		for _, item := range items {
+			if item.MessageID == m.MessageID && item.Body.Content != "" && !isCardPlaceholder(item.Body.Content) {
+				s.cache.Set(key, item.Body.Content)
+				return item.Body.Content
+			}
+		}
+	}
+	if ctx.Err() == nil {
+		s.cardFailures.Store(key, time.Now().Add(cardRetry))
+	}
+	return m.Body.Content
+}
+
 func (s *Service) render(ctx context.Context, raws []RawMessage) rendered {
-	// Repair interactive messages that only contain upgrade placeholders
+	return s.renderMessages(ctx, raws, renderSummary)
+}
+
+func (s *Service) renderMessages(ctx context.Context, raws []RawMessage, mode renderMode) rendered {
 	for i := range raws {
 		m := &raws[i]
-		if m.MsgType == "interactive" && !m.Deleted && isCardPlaceholder(m.Body.Content) {
-			if items, err := s.api.GetMessage(ctx, m.MessageID); err == nil && len(items) > 0 {
-				if !isCardPlaceholder(items[0].Body.Content) {
-					m.Body.Content = items[0].Body.Content
-				}
-			}
+		if isPlaceholderCardMessage(*m) {
+			m.Body.Content = s.cardContent(ctx, *m, mode == renderDetail)
 		}
 	}
 
@@ -928,7 +1051,7 @@ func (s *Service) render(ctx context.Context, raws []RawMessage) rendered {
 		if m.MsgType != "merge_forward" || m.Deleted {
 			continue
 		}
-		subs, err := s.forwardSubs(ctx, m)
+		subs, err := s.forwardSubs(ctx, m, mode == renderLocal)
 		if err != nil {
 			fwdErr[m.MessageID] = err
 			continue
@@ -937,7 +1060,7 @@ func (s *Service) render(ctx context.Context, raws []RawMessage) rendered {
 		allForSenders = append(allForSenders, subs...)
 	}
 	for _, m := range allForSenders {
-		if m.MsgType == "share_chat" {
+		if m.MsgType == "share_chat" && mode != renderLocal {
 			_, _ = s.Chats(ctx, false) // so shared group cards can show the group name
 			break
 		}
@@ -948,17 +1071,16 @@ func (s *Service) render(ctx context.Context, raws []RawMessage) rendered {
 			ids = append(ids, cardUserIDs(m.Body.Content)...)
 		}
 	}
-	var self *UserInfo
-	if st := s.auth.Status(); st.User != nil && st.User.OpenID != "" {
-		self = st.User
-		if st.User.Name != "" {
+	self := s.userFor(ctx)
+	if self != nil && self.OpenID != "" {
+		if self.Name != "" {
 			// we already know the logged-in user's own name from the login
-			hints[st.User.OpenID] = st.User.Name
+			hints[self.OpenID] = self.Name
 		}
 	}
-	users, warns := s.resolveUsers(ctx, ids, hints)
+	users, warns := s.resolveUsers(ctx, ids, hints, mode == renderLocal)
 	r := rendered{warns: warns}
-	rc := &renderCtx{users: users, opts: s.parseOpts(), self: self, seen: map[string]bool{}, r: &r}
+	rc := &renderCtx{users: users, opts: s.parseOptsFor(ctx), self: self, seen: map[string]bool{}, r: &r}
 	for i, m := range raws {
 		msg := s.renderOne(rc, m, false, true)
 		msg.IsRoot = isRoot(m) && i == 0
@@ -992,7 +1114,7 @@ func (s *Service) render(ctx context.Context, raws []RawMessage) rendered {
 	return r
 }
 
-func (s *Service) buildTopic(chatID, chatName, threadID string, raws []RawMessage, r rendered) Topic {
+func (s *Service) buildTopic(ctx context.Context, chatID, chatName, threadID string, raws []RawMessage, r rendered) Topic {
 	t := Topic{ThreadID: threadID, ChatID: chatID, ChatName: chatName, ReplyCount: -1}
 	if len(raws) == 0 {
 		return t
@@ -1032,10 +1154,9 @@ func (s *Service) buildTopic(chatID, chatName, threadID string, raws []RawMessag
 	if rm.Title != "" {
 		t.Snippet = firstLine(strings.TrimPrefix(rm.Plain, rm.Title), 120)
 	}
-	currUserID := s.auth.UserID()
-	currUserName := ""
-	if st := s.auth.Status(); st.User != nil {
-		currUserName = st.User.Name
+	var currUserID, currUserName string
+	if user := s.userFor(ctx); user != nil {
+		currUserID, currUserName = user.OpenID, user.Name
 	}
 	var userIDs []string
 	seenU := map[string]bool{}
@@ -1078,16 +1199,7 @@ func (s *Service) buildTopic(chatID, chatName, threadID string, raws []RawMessag
 	return t
 }
 
-// MyTopics returns all topics across Daidainiao chats that are related to the logged-in user,
-// ordered by last activity time descending.
-func (s *Service) MyTopics(ctx context.Context, refresh bool) (*TopicsResp, error) {
-	if err := s.requireLogin(); err != nil {
-		return nil, err
-	}
-	allChats, err := s.Chats(ctx, refresh)
-	if err != nil {
-		return nil, err
-	}
+func daidainiaoTopicChats(allChats []Chat) []Chat {
 	var targetChats []Chat
 	for _, c := range allChats {
 		if strings.Contains(c.Name, "呆呆鸟") && !strings.Contains(c.Name, "总群") {
@@ -1101,16 +1213,79 @@ func (s *Service) MyTopics(ctx context.Context, refresh bool) (*TopicsResp, erro
 			}
 		}
 	}
-	if len(targetChats) == 0 {
-		targetChats = allChats
+	if len(targetChats) != 0 {
+		return targetChats
 	}
+	return allChats
+}
 
-	type chatResult struct {
-		topics []Topic
-		warns  []string
-		err    error
+type topicScanKey struct {
+	snapshot string
+	refresh  bool
+}
+
+type topicScan struct {
+	done chan struct{}
+	resp *TopicsResp
+	err  error
+}
+
+func (s *Service) scanTopics(ctx context.Context, key topicScanKey, scan func(context.Context) (*TopicsResp, error)) (*TopicsResp, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	results := make([]chatResult, len(targetChats))
+	call := &topicScan{done: make(chan struct{})}
+	actual, exists := s.topicScans.LoadOrStore(key, call)
+	if exists {
+		call = actual.(*topicScan)
+	} else {
+		go func() {
+			// Each waiter can leave independently while the shared scan still runs.
+			work, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+			defer cancel()
+			call.resp, call.err = scan(work)
+			if call.err == nil {
+				call.err = work.Err()
+			}
+			if call.err == nil {
+				unlock := s.lock(key.snapshot)
+				s.cache.Set(key.snapshot, call.resp)
+				unlock()
+			}
+			s.topicScans.Delete(key)
+			close(call.done)
+		}()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		if s.auth.UserID() != s.userFor(ctx).OpenID {
+			return nil, ErrLoginRequired
+		}
+		return call.resp, call.err
+	}
+}
+
+// MyTopics returns topics related to the current user across Daidainiao chats.
+func (s *Service) MyTopics(ctx context.Context, refresh bool) (*TopicsResp, error) {
+	ctx, err := s.topicContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := topicScanKey{snapshot: s.keyFor(ctx, "mytopics"), refresh: refresh}
+	return s.scanTopics(ctx, key, func(ctx context.Context) (*TopicsResp, error) {
+		return s.loadMyTopics(ctx, refresh)
+	})
+}
+
+func (s *Service) loadMyTopics(ctx context.Context, refresh bool) (*TopicsResp, error) {
+	allChats, err := s.Chats(ctx, refresh)
+	if err != nil {
+		return nil, err
+	}
+	targetChats := daidainiaoTopicChats(allChats)
+	results := make([]*TopicsResp, len(targetChats))
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 	for i, c := range targetChats {
@@ -1119,68 +1294,147 @@ func (s *Service) MyTopics(ctx context.Context, refresh bool) (*TopicsResp, erro
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			resp, err := s.Topics(ctx, chatID, refresh)
-			if err != nil {
-				results[idx].err = err
-				return
-			}
-			results[idx].topics = resp.Topics
-			results[idx].warns = resp.Warnings
+			results[idx], _ = s.Topics(ctx, chatID, refresh)
 		}(i, c.ChatID)
 	}
 	wg.Wait()
 
-	currUserID := s.auth.UserID()
-	currUserName := ""
-	if st := s.auth.Status(); st.User != nil {
-		currUserName = st.User.Name
-	}
+	return relatedTopics(s.userFor(ctx), results), nil
+}
 
-	var myTopics []Topic
+func relatedTopics(user *UserInfo, results []*TopicsResp) *TopicsResp {
+	resp := &TopicsResp{}
 	seenThreads := map[string]bool{}
 	warnSet := map[string]bool{}
 	for _, r := range results {
-		for _, w := range r.warns {
+		if r == nil {
+			continue
+		}
+		for _, w := range r.Warnings {
 			if !warnSet[w] {
 				warnSet[w] = true
+				resp.Warnings = append(resp.Warnings, w)
 			}
 		}
-		for _, tp := range r.topics {
+		for _, tp := range r.Topics {
 			if seenThreads[tp.ThreadID] {
 				continue
 			}
 			isRelated := tp.UserInvolved ||
-				(currUserID != "" && tp.SenderID == currUserID) ||
-				(currUserName != "" && tp.SenderName == currUserName)
+				(user.OpenID != "" && tp.SenderID == user.OpenID) ||
+				(user.Name != "" && tp.SenderName == user.Name)
 			if isRelated {
 				seenThreads[tp.ThreadID] = true
-				myTopics = append(myTopics, tp)
+				resp.Topics = append(resp.Topics, tp)
 			}
 		}
 	}
 
-	sort.SliceStable(myTopics, func(i, j int) bool {
-		return myTopics[i].LastTime > myTopics[j].LastTime
-	})
+	sortTopics(resp.Topics)
+	return resp
+}
 
-	var warns []string
-	for w := range warnSet {
-		warns = append(warns, w)
+func (s *Service) MyTopicsCached(ctx context.Context) (*TopicsResp, error) {
+	ctx, err := s.topicContext(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return &TopicsResp{Topics: myTopics, Warnings: warns}, nil
+	if resp, ok := s.topicSnapshot(s.keyFor(ctx, "mytopics")); ok {
+		return resp, nil
+	}
+	chats, _, _ := s.ChatsCached(ctx)
+	var groups []*TopicsResp
+	for _, chat := range daidainiaoTopicChats(chats) {
+		if group := s.cachedTopics(ctx, chat); group.FromCache {
+			groups = append(groups, group)
+		}
+	}
+	resp := relatedTopics(s.userFor(ctx), groups)
+	resp.FromCache = len(groups) > 0
+	if resp.Topics == nil {
+		resp.Topics = []Topic{}
+	}
+	return resp, nil
+}
+
+func (s *Service) TopicsCached(ctx context.Context, chatID string) (*TopicsResp, error) {
+	ctx, err := s.topicContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.cachedTopics(ctx, Chat{ChatID: chatID}), nil
+}
+
+func (s *Service) topicSnapshot(key string) (*TopicsResp, bool) {
+	var resp TopicsResp
+	if _, ok := s.cache.Get(key, &resp); !ok {
+		return nil, false
+	}
+	resp.FromCache = true
+	if resp.Topics == nil {
+		resp.Topics = []Topic{}
+	}
+	return &resp, true
+}
+
+func (s *Service) cachedTopics(ctx context.Context, chat Chat) *TopicsResp {
+	chatID, chatName := chat.ChatID, chat.Name
+	if resp, ok := s.topicSnapshot(s.keyFor(ctx, "topics:"+chatID)); ok {
+		return resp
+	}
+	var refs []threadRef
+	_, found := s.cache.Get(s.keyFor(ctx, "threadrefs:"+chatID), &refs)
+	if chatName == "" {
+		chats, _, _ := s.ChatsCached(ctx)
+		chatName = cachedChatName(chats, chatID)
+	}
+	resp := &TopicsResp{ChatID: chatID, Topics: []Topic{}, FromCache: found}
+	for _, ref := range refs {
+		if ref.ThreadID == "" {
+			continue
+		}
+		var raws []RawMessage
+		_, hasThread := s.cache.Get(s.keyFor(ctx, "thread:"+ref.ThreadID), &raws)
+		raws = mergeRoot(raws, ref.Root)
+		if len(raws) == 0 {
+			continue
+		}
+		r := s.renderMessages(ctx, raws, renderLocal)
+		topic := s.buildTopic(ctx, chatID, chatName, ref.ThreadID, raws, r)
+		if !hasThread {
+			topic.ReplyCount = -1
+		}
+		resp.Topics = append(resp.Topics, topic)
+	}
+	resp.Topics = append(resp.Topics, s.pendingTopics(ctx, chatID, chatName, resp.Topics, renderLocal)...)
+	resp.FromCache = resp.FromCache || len(resp.Topics) > 0
+	sortTopics(resp.Topics)
+	return resp
 }
 
 // ---------- public operations ----------
 
 func (s *Service) Topics(ctx context.Context, chatID string, refresh bool) (*TopicsResp, error) {
-	if err := s.requireLogin(); err != nil {
+	ctx, err := s.topicContext(ctx)
+	if err != nil {
 		return nil, err
 	}
+	key := topicScanKey{snapshot: s.keyFor(ctx, "topics:"+chatID), refresh: refresh}
+	return s.scanTopics(ctx, key, func(ctx context.Context) (*TopicsResp, error) {
+		return s.loadTopics(ctx, chatID, refresh)
+	})
+}
+
+func (s *Service) loadTopics(ctx context.Context, chatID string, refresh bool) (*TopicsResp, error) {
 	refs, err := s.threadRefs(ctx, chatID, refresh)
 	if err != nil {
 		return nil, err
 	}
 	chatName := s.chatName(ctx, chatID)
+	mode := renderSummary
+	if refresh {
+		mode = renderDetail
+	}
 	type result struct {
 		topic Topic
 		warns []string
@@ -1204,8 +1458,8 @@ func (s *Service) Topics(ctx context.Context, chatID string, refresh bool) (*Top
 					return
 				}
 			}
-			r := s.render(ctx, raws)
-			t := s.buildTopic(chatID, chatName, ref.ThreadID, raws, r)
+			r := s.renderMessages(ctx, raws, mode)
+			t := s.buildTopic(ctx, chatID, chatName, ref.ThreadID, raws, r)
 			if err != nil {
 				t.ReplyCount = -1
 			}
@@ -1235,14 +1489,14 @@ func (s *Service) Topics(ctx context.Context, chatID string, refresh bool) (*Top
 			}
 		}
 	}
-	if failed > 0 && len(resp.Topics) == 0 && firstErr != nil && len(s.pendingList(chatID)) == 0 {
+	if failed > 0 && len(resp.Topics) == 0 && firstErr != nil && len(s.pendingForKey(s.keyFor(ctx, "pending:"+chatID))) == 0 {
 		return nil, firstErr
 	}
 	if failed > 0 {
 		resp.Warnings = append(resp.Warnings, fmt.Sprintf("%d 个话题的回复读取失败（回复数未知）：%s", failed, truncate(firstErr.Error(), 120)))
 	}
-	resp.Topics = append(resp.Topics, s.pendingTopics(ctx, chatID, chatName, resp.Topics)...)
-	sort.SliceStable(resp.Topics, func(i, j int) bool { return resp.Topics[i].LastTime > resp.Topics[j].LastTime })
+	resp.Topics = append(resp.Topics, s.pendingTopics(ctx, chatID, chatName, resp.Topics, mode)...)
+	sortTopics(resp.Topics)
 	return resp, nil
 }
 
@@ -1255,7 +1509,7 @@ func (s *Service) Thread(ctx context.Context, threadID string, refresh bool) (*T
 	}
 	// The thread container omits the opening message. Keep one we already
 	// stored, and if the listing is only replies, load the root by its id.
-	raws, err := s.threadMessages(ctx, threadID, s.knownRoot(threadID), refresh)
+	raws, err := s.loadThreadMessages(ctx, threadID, s.knownRoot(threadID), refresh, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1263,9 +1517,9 @@ func (s *Service) Thread(ctx context.Context, threadID string, refresh bool) (*T
 	if len(raws) == 0 {
 		return nil, fmt.Errorf("话题 %s 没有消息", threadID)
 	}
-	r := s.render(ctx, raws)
+	r := s.renderMessages(ctx, raws, renderDetail)
 	chatID := raws[0].ChatID
-	topic := s.buildTopic(chatID, s.chatName(ctx, chatID), threadID, raws, r)
+	topic := s.buildTopic(ctx, chatID, s.chatName(ctx, chatID), threadID, raws, r)
 	// mark root properly
 	for i := range r.msgs {
 		r.msgs[i].IsRoot = r.msgs[i].ID == topic.RootMessageID

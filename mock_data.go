@@ -395,23 +395,29 @@ func (m *MockAPI) DriveMeta(ctx context.Context, token string) (*DriveDocMeta, e
 	if token == "boxmockdenied" {
 		return nil, &FeishuError{Code: 0, HTTPStatus: 403, Msg: "没有查看该云空间文件的权限"}
 	}
-	m.mu.RLock()
+	m.mu.Lock()
 	name := m.driveNames[token]
 	mod := m.driveModTimes[token]
-	m.mu.RUnlock()
 	if name == "" {
 		name = "云空间文件-" + token + ".txt"
 	}
+	// Keep an unset timestamp stable so a later read is not mistaken for a cloud edit.
 	if mod == 0 {
 		mod = time.Now().UnixMilli()
+		if m.driveModTimes == nil {
+			m.driveModTimes = map[string]int64{}
+		}
+		m.driveModTimes[token] = mod
+	}
+	m.mu.Unlock()
+	owner := "ou_mock_owner"
+	if m.auth != nil {
+		if id := m.auth.UserID(); id != "" {
+			owner = id
+		}
 	}
 	return &DriveDocMeta{
-		OwnerID: func() string {
-			if m.auth != nil {
-				return m.auth.UserID()
-			}
-			return "ou_mock_owner"
-		}(),
+		OwnerID:          owner,
 		DocToken:         token,
 		DocType:          "file",
 		Title:            name,
@@ -458,9 +464,10 @@ func (m *MockAPI) DriveDownload(ctx context.Context, token string) (*Download, e
 		name = "云空间文件-" + token + ".txt"
 	}
 	if hasCustom {
-		return &Download{Body: io.NopCloser(bytes.NewReader(customBytes)), ContentType: "application/octet-stream", Filename: name}, nil
+		return &Download{Body: io.NopCloser(bytes.NewReader(customBytes)), ContentType: "application/octet-stream", Filename: name, Size: int64(len(customBytes))}, nil
 	}
-	return &Download{Body: io.NopCloser(strings.NewReader("mock drive file " + token + "\n")), ContentType: "application/octet-stream", Filename: name}, nil
+	content := "mock drive file " + token + "\n"
+	return &Download{Body: io.NopCloser(strings.NewReader(content)), ContentType: "application/octet-stream", Filename: name, Size: int64(len(content))}, nil
 }
 
 // SendBotCard mocks sending an interactive card to userOpenID.

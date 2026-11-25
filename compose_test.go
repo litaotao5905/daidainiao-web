@@ -33,7 +33,7 @@ func TestUploadScopesFollowUploadMode(t *testing.T) {
 	c.UploadMode = "off"
 	c.DisableDownload = true
 	c.Normalize()
-	if c.UploadEnabled() || containsScope(c.Scopes, "drive:drive") {
+	if c.UploadEnabled() || c.uploadScopeOK([]string{"drive:drive"}) {
 		t.Fatal("off")
 	}
 	c = defaultConfig()
@@ -45,8 +45,8 @@ func TestUploadScopesFollowUploadMode(t *testing.T) {
 	c = defaultConfig()
 	c.Scopes = append([]string{}, DriveNarrowScopes...)
 	c.Normalize()
-	if containsScope(c.Scopes, "drive:drive") {
-		t.Fatal("narrow scopes should be respected")
+	if !containsAll(c.Scopes, DriveNarrowScopes) || !containsAll(c.Scopes, []string{"wiki:wiki", "drive:drive"}) {
+		t.Fatal("legacy narrow scopes and workspace scopes should coexist")
 	}
 }
 

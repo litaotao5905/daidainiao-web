@@ -85,6 +85,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/upload/{id}", s.handleUnstage)
 	mux.HandleFunc("GET /api/resource", s.handleResource)
 	mux.HandleFunc("GET /api/csrf", s.handleCSRF)
+	mux.HandleFunc("GET /api/workspace", s.handleWorkspace)
+	mux.HandleFunc("POST /api/workspace", s.handleWorkspace)
+	mux.HandleFunc("POST /api/workspace/local/pick", s.handleWorkspaceLocalPick)
+	mux.HandleFunc("GET /api/workspace/local/places", s.handleWorkspaceLocalPlaces)
+	mux.HandleFunc("GET /api/workspace/local/browse", s.handleWorkspaceLocalBrowse)
+	mux.HandleFunc("GET /api/workspace/cloud/browse", s.handleWorkspaceCloudBrowse)
+	mux.HandleFunc("GET /api/workspace/local/search", s.handleWorkspaceLocalSearch)
+	mux.HandleFunc("GET /api/workspace/cloud/search", s.handleWorkspaceCloudSearch)
+	mux.HandleFunc("GET /api/workspace/spaces", s.handleWorkspaceSpaces)
+	mux.HandleFunc("GET /api/workspace/drive/roots", s.handleWorkspaceDriveRoots)
+	mux.HandleFunc("GET /api/workspace/tree", s.handleWorkspaceTree)
+	mux.HandleFunc("POST /api/workspace/transfer", s.handleWorkspaceTransfer)
+	mux.HandleFunc("POST /api/workspace/stage", s.handleWorkspaceStage)
+	mux.HandleFunc("POST /api/workspace/reveal", s.handleWorkspaceReveal)
+	mux.HandleFunc("POST /api/workspace/preview", s.handleWorkspacePreview)
+	mux.HandleFunc("POST /api/workspace/sync_local", s.handleWorkspaceSyncLocal)
+	mux.HandleFunc("DELETE /api/workspace/preview_cache", s.handleWorkspaceClearPreview)
 	mux.HandleFunc("GET /api/downloads", s.handleDownloads)
 	mux.HandleFunc("GET /api/files/{id}/content", s.handleFileContent)
 	mux.HandleFunc("POST /api/files/open", s.handleFileOpen)
@@ -100,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/read_state", s.handlePostReadState)
 	if s.mock {
 		mux.HandleFunc("GET /api/mock/avatar", handleMockAvatar)
+		mux.HandleFunc("GET /api/mock/workspace/{kind}/{token}", s.handleMockWorkspacePreview)
 	}
 	mux.Handle("/", noCache(http.FileServer(http.FS(s.web))))
 	return s.guard(mux)
@@ -473,7 +491,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
-	chats, err := s.svc.Chats(r.Context(), r.URL.Query().Get("refresh") == "1")
+	q := r.URL.Query()
+	refresh := q.Get("refresh") == "1"
+	cached := q.Get("cached") == "1" && !refresh
+	var chats []Chat
+	var fromCache bool
+	var err error
+	if cached {
+		chats, fromCache, err = s.svc.ChatsCached(r.Context())
+	} else {
+		chats, err = s.svc.Chats(r.Context(), refresh)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -490,7 +518,11 @@ func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
 	if chats == nil {
 		chats = []Chat{}
 	}
-	writeJSON(w, 200, map[string]any{"chats": chats})
+	resp := map[string]any{"chats": chats}
+	if cached {
+		resp["from_cache"] = fromCache
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *Server) handleGetSelection(w http.ResponseWriter, r *http.Request) {
@@ -513,13 +545,21 @@ func (s *Server) handlePostSelection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMyTopics(w http.ResponseWriter, r *http.Request) {
-	refresh := r.URL.Query().Get("refresh") == "1"
-	resp, err := s.svc.MyTopics(r.Context(), refresh)
+	q := r.URL.Query()
+	refresh := q.Get("refresh") == "1"
+	cached := q.Get("cached") == "1" && !refresh
+	var resp *TopicsResp
+	var err error
+	if cached {
+		resp, err = s.svc.MyTopicsCached(r.Context())
+	} else {
+		resp, err = s.svc.MyTopics(r.Context(), refresh)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, 200, resp)
+	writeTopics(w, resp, cached)
 }
 
 func (s *Server) handleTopics(w http.ResponseWriter, r *http.Request) {
@@ -529,30 +569,49 @@ func (s *Server) handleTopics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	refresh := q.Get("refresh") == "1"
+	cached := q.Get("cached") == "1" && !refresh
+	load := func(id string) (*TopicsResp, error) {
+		if cached {
+			return s.svc.TopicsCached(r.Context(), id)
+		}
+		return s.svc.Topics(r.Context(), id, refresh)
+	}
 	chatID := q.Get("chat_id")
 	if chatID == "" {
 		// all selected chats, merged
 		merged := &TopicsResp{Topics: []Topic{}}
 		for _, id := range s.sel.Get() {
-			resp, err := s.svc.Topics(r.Context(), id, refresh)
+			resp, err := load(id)
 			if err != nil {
 				merged.Warnings = append(merged.Warnings, fmt.Sprintf("%s: %v", id, err))
 				continue
 			}
 			merged.Topics = append(merged.Topics, resp.Topics...)
 			merged.Warnings = append(merged.Warnings, resp.Warnings...)
+			merged.FromCache = merged.FromCache || resp.FromCache
 		}
 		sortTopics(merged.Topics)
-		writeJSON(w, 200, merged)
+		writeTopics(w, merged, cached)
 		return
 	}
 	if !msgIDRe.MatchString(chatID) {
 		writeJSON(w, 400, apiError{Error: "chat_id 非法"})
 		return
 	}
-	resp, err := s.svc.Topics(r.Context(), chatID, refresh)
+	resp, err := load(chatID)
 	if err != nil {
 		writeErr(w, err)
+		return
+	}
+	writeTopics(w, resp, cached)
+}
+
+func writeTopics(w http.ResponseWriter, resp *TopicsResp, cached bool) {
+	if cached {
+		writeJSON(w, 200, struct {
+			*TopicsResp
+			FromCache bool `json:"from_cache"`
+		}{resp, resp.FromCache})
 		return
 	}
 	writeJSON(w, 200, resp)

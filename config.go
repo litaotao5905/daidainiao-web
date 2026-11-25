@@ -39,6 +39,10 @@ type Config struct {
 	// HostDownloadDir is only used when running in Docker: the host path that
 	// DownloadDir is mounted from, shown by "复制文件路径".
 	HostDownloadDir string `json:"host_download_dir"`
+	// HostHome is the host user home directory when the workspace maps host paths in Docker.
+	HostHome string `json:"host_home"`
+	// ContainerHome is where HostHome is mounted inside the container (e.g. /host-home).
+	ContainerHome string `json:"container_home"`
 	// DisableDownload turns the automatic local download off (resources are
 	// then only proxied from the data/cache directory as before).
 	DisableDownload bool `json:"disable_download"`
@@ -145,6 +149,12 @@ func (c *Config) ApplyEnv() {
 	if v := os.Getenv("FEISHU_HOST_DOWNLOAD_DIR"); v != "" {
 		c.HostDownloadDir = v
 	}
+	if v := os.Getenv("FEISHU_HOST_HOME"); v != "" {
+		c.HostHome = v
+	}
+	if v := os.Getenv("FEISHU_CONTAINER_HOME"); v != "" {
+		c.ContainerHome = v
+	}
 	if v := strings.ToLower(os.Getenv("FEISHU_DISABLE_DOWNLOAD")); v == "1" || v == "true" || v == "yes" {
 		c.DisableDownload = true
 	}
@@ -210,8 +220,13 @@ func (c *Config) Normalize() {
 			}
 		}
 	}
+	for _, sc := range []string{"wiki:wiki", "drive:drive", "docs:document:export"} {
+		if !containsScope(c.Scopes, sc) {
+			c.Scopes = append(c.Scopes, sc)
+		}
+	}
 	if !c.DisableDownload {
-		for _, sc := range []string{"drive:file:download", "drive:drive.metadata:readonly", "space:document:retrieve", "wiki:node:read", "docs:document:export"} {
+		for _, sc := range []string{"drive:file:download", "drive:drive.metadata:readonly", "space:document:retrieve", "wiki:node:read"} {
 			if !containsScope(c.Scopes, sc) {
 				c.Scopes = append(c.Scopes, sc)
 			}

@@ -29,6 +29,8 @@ type UserInfo struct {
 	AvatarURL string `json:"avatar_url,omitempty"`
 }
 
+type workspaceUserKey struct{}
+
 // tokenFile is what is persisted in data/token.json (mode 0600).
 type tokenFile struct {
 	AppID            string    `json:"app_id"`
@@ -335,7 +337,8 @@ func (a *Auth) UserID() string {
 func (a *Auth) AccessToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.tok == nil {
+	expected, _ := ctx.Value(workspaceUserKey{}).(string)
+	if a.tok == nil || (expected != "" && a.tok.User.OpenID != expected) {
 		return "", ErrLoginRequired
 	}
 	if time.Until(a.tok.ExpiresAt) > 90*time.Second {
@@ -349,7 +352,8 @@ func (a *Auth) AccessToken(ctx context.Context) (string, error) {
 func (a *Auth) Refresh(ctx context.Context, stale string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.tok == nil {
+	expected, _ := ctx.Value(workspaceUserKey{}).(string)
+	if a.tok == nil || (expected != "" && a.tok.User.OpenID != expected) {
 		return "", ErrLoginRequired
 	}
 	if a.tok.AccessToken != stale {

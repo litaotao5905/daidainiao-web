@@ -26,20 +26,19 @@ type pendingTopic struct {
 func (s *Service) pendingKey(chatID string) string { return s.k("pending:" + chatID) }
 
 func (s *Service) pendingList(chatID string) []pendingTopic {
+	return s.pendingForKey(s.pendingKey(chatID))
+}
+
+func (s *Service) pendingForKey(key string) []pendingTopic {
 	var list []pendingTopic
-	if _, ok := s.cache.Get(s.pendingKey(chatID), &list); !ok {
-		return nil
-	}
+	s.cache.Get(key, &list)
 	return list
 }
 
-func (s *Service) updatePending(chatID string, fn func([]pendingTopic) []pendingTopic) {
-	key := s.pendingKey(chatID)
+func (s *Service) updatePending(key string, fn func([]pendingTopic) []pendingTopic) {
 	defer s.lock(key)()
-	var list []pendingTopic
-	s.cache.Get(key, &list)
 	cutoff := time.Now().Add(-pendingTTL).UnixMilli()
-	list = fn(list)
+	list := fn(s.pendingForKey(key))
 	out := list[:0:0]
 	for _, p := range list {
 		if p.Created >= cutoff {
@@ -50,7 +49,7 @@ func (s *Service) updatePending(chatID string, fn func([]pendingTopic) []pending
 }
 
 func (s *Service) addPending(p pendingTopic) {
-	s.updatePending(p.ChatID, func(l []pendingTopic) []pendingTopic {
+	s.updatePending(s.pendingKey(p.ChatID), func(l []pendingTopic) []pendingTopic {
 		for i := range l {
 			if l[i].MessageID == p.MessageID {
 				if p.ThreadID != "" {
@@ -63,11 +62,11 @@ func (s *Service) addPending(p pendingTopic) {
 	})
 }
 
-func (s *Service) dropPending(chatID string, messageIDs map[string]bool) {
+func (s *Service) dropPending(key string, messageIDs map[string]bool) {
 	if len(messageIDs) == 0 {
 		return
 	}
-	s.updatePending(chatID, func(l []pendingTopic) []pendingTopic {
+	s.updatePending(key, func(l []pendingTopic) []pendingTopic {
 		out := l[:0:0]
 		for _, p := range l {
 			if !messageIDs[p.MessageID] {
@@ -80,8 +79,9 @@ func (s *Service) dropPending(chatID string, messageIDs map[string]bool) {
 
 // pendingTopics returns the pending topics of a chat that the thread scan did
 // not (yet) find, and forgets those it did find.
-func (s *Service) pendingTopics(ctx context.Context, chatID, chatName string, found []Topic) []Topic {
-	list := s.pendingList(chatID)
+func (s *Service) pendingTopics(ctx context.Context, chatID, chatName string, found []Topic, mode renderMode) []Topic {
+	key := s.keyFor(ctx, "pending:"+chatID)
+	list := s.pendingForKey(key)
 	if len(list) == 0 {
 		return nil
 	}
@@ -100,6 +100,9 @@ func (s *Service) pendingTopics(ctx context.Context, chatID, chatName string, fo
 		}
 		root := p.Root
 		if root == nil {
+			if mode == renderLocal {
+				continue
+			}
 			items, err := s.api.GetMessage(ctx, p.MessageID)
 			if err != nil || len(items) == 0 {
 				continue
@@ -111,12 +114,14 @@ func (s *Service) pendingTopics(ctx context.Context, chatID, chatName string, fo
 			tid = pendingThreadID(p.MessageID)
 		}
 		raws := []RawMessage{*root}
-		r := s.render(ctx, raws)
-		t := s.buildTopic(chatID, chatName, tid, raws, r)
+		r := s.renderMessages(ctx, raws, mode)
+		t := s.buildTopic(ctx, chatID, chatName, tid, raws, r)
 		t.Pending = p.ThreadID == ""
 		out = append(out, t)
 	}
-	s.dropPending(chatID, done)
+	if mode != renderLocal {
+		s.dropPending(key, done)
+	}
 	return out
 }
 
@@ -137,8 +142,8 @@ func (s *Service) pendingThread(ctx context.Context, id, mid string, refresh boo
 		return s.Thread(ctx, root.ThreadID, refresh)
 	}
 	raws := []RawMessage{root}
-	r := s.render(ctx, raws)
-	topic := s.buildTopic(root.ChatID, s.chatName(ctx, root.ChatID), id, raws, r)
+	r := s.renderMessages(ctx, raws, renderDetail)
+	topic := s.buildTopic(ctx, root.ChatID, s.chatName(ctx, root.ChatID), id, raws, r)
 	topic.Pending = true
 	for i := range r.msgs {
 		r.msgs[i].IsRoot = true
@@ -371,7 +376,7 @@ func (s *Service) NewTopic(ctx context.Context, req NewTopicRequest) (*ComposeRe
 	s.WatchTask(tid, req.ChatID, s.chatName(ctx, req.ChatID), req.Text, s.auth.UserID())
 	raws := []RawMessage{*rootRaw}
 	r := s.render(ctx, raws)
-	t := s.buildTopic(req.ChatID, s.chatName(ctx, req.ChatID), tid, raws, r)
+	t := s.buildTopic(ctx, req.ChatID, s.chatName(ctx, req.ChatID), tid, raws, r)
 	replies := len(res.raws)
 	if req.ReplyTo == "" {
 		replies--

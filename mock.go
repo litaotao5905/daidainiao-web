@@ -44,6 +44,9 @@ type MockAPI struct {
 	driveMembers   map[string][]DrivePermissionMember
 	privateClosed  map[string]bool
 	linkShares     map[string]string
+	workspaceDrive map[string][]DriveResource
+	workspaceWiki  map[string]WikiNodeDetail
+	docModTimes    map[string]int64 // "type:token" -> cloud modified time in milliseconds
 }
 
 // gate mimics the real API: every call needs a valid user login.
@@ -285,7 +288,7 @@ func (m *MockAPI) BatchUsers(ctx context.Context, ids []string) ([]User, error) 
 
 func (m *MockAPI) Download(ctx context.Context, messageID, fileKey, resType string) (*Download, error) {
 	bin := func(b []byte, ct, name string) (*Download, error) {
-		return &Download{Body: io.NopCloser(bytes.NewReader(b)), ContentType: ct, Filename: name}, nil
+		return &Download{Body: io.NopCloser(bytes.NewReader(b)), ContentType: ct, Filename: name, Size: int64(len(b))}, nil
 	}
 	if err := m.gate(ctx); err != nil {
 		return nil, err

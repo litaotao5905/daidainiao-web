@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,6 +110,97 @@ func revealCmds(goos, path string, dbus bool) [][]string {
 	}
 }
 
+func pickFolderPath(goos string, run cmdRunner) (path string, cancelled bool, err error) {
+	if os.Getenv("FEISHU_OPEN_DRYRUN") == "1" {
+		base := strings.TrimSpace(os.Getenv("FEISHU_OPEN_DRYRUN_DIR"))
+		if base == "" {
+			base, _ = os.UserHomeDir()
+		}
+		if base == "" {
+			base = os.TempDir()
+		}
+		return filepath.Join(base, "dryrun-picked"), false, nil
+	}
+	var name string
+	var args []string
+	switch goos {
+	case "darwin":
+		name, args = "osascript", []string{"-e", `POSIX path of (choose folder with prompt "选择群工作区本地文件夹")`}
+	case "windows":
+		if os.Getenv("SESSIONNAME") == "Services" {
+			return "", false, fmt.Errorf("无法在后台服务中打开目录选择器")
+		}
+		name, args = "powershell.exe", []string{"-NoProfile", "-NonInteractive", "-STA", "-Command",
+			`$ErrorActionPreference='Stop'; if (![Environment]::UserInteractive) { exit 2 }; [Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Select a group workspace folder'; if ($d.ShowDialog() -eq 'OK') { [Console]::WriteLine($d.SelectedPath) } else { [Console]::WriteLine('__CANCELLED__') }`}
+	default:
+		return "", false, fmt.Errorf("当前系统暂不支持原生目录选择器")
+	}
+	out, err := exec.Command(name, args...).CombinedOutput()
+	picked := strings.TrimRight(string(out), "\r\n")
+	if picked == "__CANCELLED__" || (err != nil && goos == "darwin" && strings.Contains(picked, "(-128)")) {
+		return "", true, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return picked, false, nil
+}
+
+func (o *Opener) Pick(ctx context.Context) (path string, cancelled bool, err error) {
+	if o.HostURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.HostURL+"/pick", bytes.NewReader([]byte("{}")))
+		if err != nil {
+			return "", false, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", false, err
+		}
+		defer resp.Body.Close()
+		var res struct {
+			Path      string `json:"path"`
+			Cancelled bool   `json:"cancelled"`
+			Error     string `json:"error"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&res); err != nil {
+			return "", false, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			if res.Error != "" {
+				return "", false, errors.New(res.Error)
+			}
+			return "", false, fmt.Errorf("host opener HTTP %d", resp.StatusCode)
+		}
+		if res.Cancelled {
+			return "", true, nil
+		}
+		return res.Path, false, nil
+	}
+	run := o.Run
+	if run == nil {
+		run = execRunner
+	}
+	goos := o.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	return pickFolderPath(goos, run)
+}
+
+func openerAllowed(path string, allowed []string) bool {
+	clean := filepath.Clean(path)
+	for _, base := range allowed {
+		base = filepath.Clean(base)
+		rel, err := filepath.Rel(base, clean)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func (o *Opener) callHost(path string, reveal bool) error {
 	body, _ := json.Marshal(map[string]any{"path": path, "reveal": reveal})
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -168,17 +260,60 @@ func (o *Opener) Reveal(path string) error {
 	return last
 }
 
+func parseHostOpenerDirs(allowedDir string) ([]string, error) {
+	if strings.TrimSpace(allowedDir) == "" {
+		return nil, fmt.Errorf("允许目录不能为空")
+	}
+	var out []string
+	for _, part := range strings.Split(allowedDir, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		clean := filepath.Clean(part)
+		if !filepath.IsAbs(clean) {
+			return nil, fmt.Errorf("允许目录必须是绝对路径: %s", part)
+		}
+		out = append(out, clean)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("允许目录不能为空")
+	}
+	return out, nil
+}
+
 // ServeHostOpener runs a tiny loopback service on the host OS so a local Docker
-// container (e.g. OrbStack) can open files or reveal folders inside allowedDir.
+// container (e.g. OrbStack) can open files or reveal folders inside allowed roots.
 func ServeHostOpener(addr, allowedDir string) error {
-	baseClean := filepath.Clean(allowedDir)
-	if !filepath.IsAbs(baseClean) {
-		return fmt.Errorf("允许目录必须是绝对路径: %s", allowedDir)
+	allowed, err := parseHostOpenerDirs(allowedDir)
+	if err != nil {
+		return err
 	}
 	localOpener := &Opener{GOOS: runtime.GOOS, Run: execRunner, LookPath: exec.LookPath}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dir": baseClean})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dirs": allowed})
+	})
+	mux.HandleFunc("POST /pick", func(w http.ResponseWriter, r *http.Request) {
+		path, cancelled, err := localOpener.Pick(r.Context())
+		if cancelled {
+			writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if path == "" {
+			writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
+			return
+		}
+		cleanPath := filepath.Clean(path)
+		if !openerAllowed(cleanPath, allowed) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "所选目录不在允许范围内"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"path": cleanPath})
 	})
 	mux.HandleFunc("POST /open", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -190,9 +325,8 @@ func ServeHostOpener(addr, allowedDir string) error {
 			return
 		}
 		cleanPath := filepath.Clean(req.Path)
-		rel, err := filepath.Rel(baseClean, cleanPath)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "只允许打开下载目录内的文件"})
+		if !openerAllowed(cleanPath, allowed) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "只允许打开允许目录内的文件"})
 			return
 		}
 		var runErr error
@@ -207,6 +341,6 @@ func ServeHostOpener(addr, allowedDir string) error {
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
-	log.Printf("宿主机文件打开助手已启动：http://%s（允许目录：%s）", addr, baseClean)
+	log.Printf("宿主机文件打开助手已启动：http://%s（允许目录：%s）", addr, strings.Join(allowed, ", "))
 	return http.ListenAndServe(addr, mux)
 }

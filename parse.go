@@ -17,12 +17,12 @@ var (
 	keyRe = regexp.MustCompile(`^[A-Za-z0-9_\-]{1,200}$`)
 )
 
-var docPathPrefixes = []string{"/doc/", "/docx/", "/docs/", "/wiki/", "/sheets/", "/base/", "/bitable/", "/file/", "/mindnotes/", "/slides/", "/minutes/", "/drive/"}
+var docPathPrefixes = []string{"/doc/", "/docx/", "/docs/", "/wiki/", "/sheets/", "/base/", "/bitable/", "/file/", "/folder/", "/mindnotes/", "/slides/", "/minutes/", "/drive/"}
 
 // isDocURL reports whether href looks like a Feishu/Lark document link.
 func isDocURL(href string) bool {
 	u, err := url.Parse(href)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
 	h := strings.ToLower(u.Hostname())
@@ -333,12 +333,18 @@ func (b *builder) fromPostNodes(rows [][]postNode) {
 					}
 				}
 			case "code_block":
-				nodes = append(nodes, Node{Type: "code", Text: pn.Text, Lang: strings.ToLower(pn.Language)})
 				// Private attachment links are sent as literal blocks to avoid IM
-				// auto-authorization. Still discover them for the local file panel.
+				// auto-authorization. Render a complete link in this app for preview.
 				literal := strings.TrimSpace(pn.Text)
-				if parts := tokenize(literal, newMentionIndex(nil)); len(parts) == 1 && parts[0].Type == "link" && parts[0].Href == literal && parts[0].IsDoc {
-					b.addLink(literal, "")
+				if parts := tokenize(literal, newMentionIndex(nil)); len(parts) == 1 && parts[0].Type == "link" && parts[0].IsDoc {
+					nodes = append(nodes, parts[0])
+					name := parts[0].Text
+					if name == parts[0].Href {
+						name = ""
+					}
+					b.addLink(parts[0].Href, name)
+				} else {
+					nodes = append(nodes, Node{Type: "code", Text: pn.Text, Lang: strings.ToLower(pn.Language)})
 				}
 			case "button":
 				if pn.Text != "" {

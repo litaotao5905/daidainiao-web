@@ -1008,6 +1008,25 @@ func (m *DownloadManager) Get(id string) (DLEntry, bool) {
 	return DLEntry{}, false
 }
 
+func (m *DownloadManager) workspaceCopy(chatID, resType, messageID, fileKey string) (DLEntry, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := dlKey(resType, messageID, fileKey)
+	if alias := m.aliases[key]; alias != "" {
+		key = alias
+	}
+	if entry := m.entries[key]; entry != nil && entry.ChatID == chatID && m.validLocalLocked(entry) {
+		return *entry, true
+	}
+	for _, e := range m.entries {
+		if e.ChatID == chatID && e.ResType == resType && e.FileKey == fileKey &&
+			(e.MessageID == messageID || resType == "drive") && m.validLocalLocked(e) {
+			return *e, true
+		}
+	}
+	return DLEntry{}, false
+}
+
 // ErrOutsideDir means an index entry resolves outside the download directory.
 var ErrOutsideDir = errors.New("文件不在下载目录内")
 

@@ -190,9 +190,10 @@ type Topic struct {
 
 // TopicsResp is the response of GET /api/topics.
 type TopicsResp struct {
-	ChatID   string   `json:"chat_id,omitempty"`
-	Topics   []Topic  `json:"topics"`
-	Warnings []string `json:"warnings,omitempty"`
+	ChatID    string   `json:"chat_id,omitempty"`
+	Topics    []Topic  `json:"topics"`
+	Warnings  []string `json:"warnings,omitempty"`
+	FromCache bool     `json:"-"`
 }
 
 // ThreadResp is the response of GET /api/topics/{id}/messages.
