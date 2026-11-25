@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -205,6 +206,12 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	next := ChatWorkspace{AttachContext: req.AttachContext, Items: []WorkspaceItem{}}
 	used := make(map[string]bool, len(req.Items))
+	bindings := make(map[[3]string]bool, len(req.Items))
+	for _, item := range req.Items {
+		if old := previous[item.ID]; old.ID != "" {
+			bindings[workspaceBindingKey(old)] = true
+		}
+	}
 	ctx := workspaceContext(r, uid)
 	for _, item := range req.Items {
 		old := previous[item.ID]
@@ -218,7 +225,8 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if item.ID == "" {
+		newBinding := item.ID == ""
+		if newBinding {
 			item.ID = newCSRFToken()
 		}
 		if !keyRe.MatchString(item.ID) || used[item.ID] {
@@ -231,6 +239,11 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeWorkspaceErr(w, err)
 			return
 		}
+		key := workspaceBindingKey(item)
+		if newBinding && bindings[key] {
+			continue
+		}
+		bindings[key] = true
 		next.Items = append(next.Items, item)
 	}
 	for id, item := range previous {
@@ -252,6 +265,17 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, next)
+}
+
+func workspaceBindingKey(item WorkspaceItem) [3]string {
+	switch {
+	case item.Kind == workspaceLocal:
+		return [3]string{item.Kind, item.LocalPath}
+	case item.Token != "":
+		return [3]string{item.Kind, item.Token}
+	default:
+		return [3]string{item.Kind, "", item.SpaceID}
+	}
 }
 
 func (s *Service) normalizeWorkspaceItem(ctx context.Context, item, old WorkspaceItem) (WorkspaceItem, error) {
@@ -615,6 +639,332 @@ func (s *Server) handleWorkspaceCloudBrowse(w http.ResponseWriter, r *http.Reque
 	default:
 		writeErr(w, badRequest("工作区类型无效"))
 	}
+}
+
+type workspaceCloudMatch struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Token   string `json:"token,omitempty"`
+	SpaceID string `json:"space_id,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Hint    string `json:"hint"`
+	CanBind bool   `json:"can_bind"`
+}
+
+type workspaceCloudMatches struct {
+	Items   []workspaceCloudMatch `json:"items"`
+	Warning string                `json:"warning,omitempty"`
+}
+
+func workspaceNameMatches(name, query string) bool {
+	return strings.Contains(strings.ToLower(name), strings.ToLower(query))
+}
+
+func (s *Server) handleWorkspaceLocalSearch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.workspaceUser(w, r); !ok || !s.localOnly(w, r) {
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeErr(w, badRequest("请输入搜索关键词"))
+		return
+	}
+	items, err := s.svc.workspaceSearchLocal(r.Context(), query, strings.TrimSpace(r.URL.Query().Get("dir")))
+	if err != nil {
+		writeWorkspaceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleWorkspaceCloudSearch(w http.ResponseWriter, r *http.Request) {
+	uid, ok := s.workspaceUser(w, r)
+	if !ok {
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeErr(w, badRequest("请输入搜索关键词"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(workspaceContext(r, uid), 15*time.Second)
+	defer cancel()
+	var result workspaceCloudMatches
+	var err error
+	switch r.URL.Query().Get("kind") {
+	case workspaceDrive:
+		result, err = s.svc.workspaceSearchDrive(ctx, query)
+	case workspaceWiki:
+		result, err = s.svc.workspaceSearchWiki(ctx, query)
+	default:
+		writeErr(w, badRequest("工作区类型无效"))
+		return
+	}
+	if s.svc.auth.UserID() != uid {
+		writeErr(w, ErrLoginRequired)
+		return
+	}
+	if err != nil {
+		writeWorkspaceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+const workspaceCloudSearchLimit = 40
+const workspaceSearchConcurrency = 4
+
+// Callers pass at most workspaceSearchConcurrency entries per batch.
+func workspaceSearchBatch(count int, run func(int)) {
+	var group sync.WaitGroup
+	for i := 0; i < count; i++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			run(index)
+		}(i)
+	}
+	group.Wait()
+}
+
+func (s *Service) workspaceSearchDrive(ctx context.Context, query string) (workspaceCloudMatches, error) {
+	var folders, docs []workspaceCloudMatch
+	var folderErr, docsErr error
+	workspaceSearchBatch(2, func(i int) {
+		if i == 0 {
+			folders, folderErr = s.workspaceSearchDriveFolders(ctx, query)
+		} else {
+			docs, docsErr = s.workspaceSearchDriveDocs(ctx, query)
+		}
+	})
+	result := workspaceCloudMatches{Items: append(append([]workspaceCloudMatch{}, folders...), docs...)}
+	switch {
+	case folderErr != nil && docsErr != nil && len(result.Items) == 0:
+		return result, folderErr
+	case folderErr != nil:
+		result.Warning = "部分云盘文件夹暂未搜到，可展开目录查找。"
+	case docsErr != nil:
+		result.Warning = "暂未能搜索云盘文档和文件。"
+	}
+	return result, nil
+}
+
+func (s *Service) workspaceSearchDriveFolders(ctx context.Context, query string) ([]workspaceCloudMatch, error) {
+	root, err := s.api.DriveRootFolder(ctx)
+	if err != nil {
+		return nil, err
+	}
+	const maxDepth, maxFolders, maxPages = 3, 40, 56
+	type folder struct{ token, path, page string }
+	level := []folder{{token: root, path: "我的空间"}}
+	seen := map[string]bool{root: true}
+	pagesLeft, foldersLeft := maxPages, maxFolders-1
+	matches := []workspaceCloudMatch{}
+	origin := workspaceFeishuOrigin(s.cfg.BaseURL)
+	var firstErr error
+	for depth := 1; depth <= maxDepth && len(level) > 0 && pagesLeft > 0; depth++ {
+		var children []folder
+		for len(level) > 0 && pagesLeft > 0 {
+			if ctx.Err() != nil || len(matches) == workspaceCloudSearchLimit {
+				return matches, firstError(ctx.Err(), firstErr)
+			}
+			count := min(len(level), pagesLeft, workspaceSearchConcurrency)
+			batch := level[:count]
+			level = level[count:]
+			pagesLeft -= count
+			pages, errs := make([]*DriveListPage, count), make([]error, count)
+			workspaceSearchBatch(count, func(i int) {
+				pages[i], errs[i] = s.api.DriveList(ctx, batch[i].token, batch[i].page)
+			})
+			for i, page := range pages {
+				if errs[i] != nil {
+					firstErr = firstError(firstErr, errs[i])
+					continue
+				}
+				parent := batch[i]
+				for _, item := range page.Files {
+					if item.Type != "folder" || !keyRe.MatchString(item.Token) || seen[item.Token] {
+						continue
+					}
+					seen[item.Token] = true
+					if workspaceNameMatches(item.Name, query) {
+						matches = append(matches, workspaceCloudMatch{
+							Name: item.Name, Kind: workspaceDrive, Token: item.Token, Hint: parent.path, CanBind: true,
+							URL: firstNonEmpty(item.URL, workspaceResourceURL(origin, "folder", item.Token)),
+						})
+						if len(matches) == workspaceCloudSearchLimit {
+							return matches, firstErr
+						}
+					}
+					if depth < maxDepth && foldersLeft > 0 {
+						children = append(children, folder{token: item.Token, path: parent.path + " / " + item.Name})
+						foldersLeft--
+					}
+				}
+				if page.HasMore && page.NextPage != "" && page.NextPage != parent.page {
+					parent.page = page.NextPage
+					level = append(level, parent)
+				}
+			}
+		}
+		level = children
+	}
+	return matches, firstErr
+}
+
+func (s *Service) workspaceSearchDriveDocs(ctx context.Context, query string) ([]workspaceCloudMatch, error) {
+	page, err := s.api.DriveSearchObjects(ctx, query, nil, 0, workspaceCloudSearchLimit)
+	if err != nil {
+		return nil, err
+	}
+	origin := workspaceFeishuOrigin(s.cfg.BaseURL)
+	var refs []DriveRef
+	for _, item := range page.Items {
+		if !isDocURL(item.URL) && workspaceResourceURL(origin, item.Type, item.Token) != "" && item.Type != "folder" {
+			refs = append(refs, DriveRef{Token: item.Token, Type: item.Type})
+		}
+	}
+	var metas map[string]DriveResource
+	if len(refs) > 0 {
+		metas, _ = s.api.DriveMetas(ctx, refs)
+	}
+	matches := []workspaceCloudMatch{}
+	seen := map[string]bool{}
+	for _, item := range page.Items {
+		key := item.Type + ":" + item.Token
+		if item.Type == "folder" || seen[key] || !keyRe.MatchString(item.Token) {
+			continue
+		}
+		seen[key] = true
+		href := item.URL
+		if !isDocURL(href) {
+			href = metas[key].URL
+		}
+		if !isDocURL(href) {
+			href = workspaceResourceURL(origin, item.Type, item.Token)
+		}
+		if href != "" {
+			matches = append(matches, workspaceCloudMatch{
+				Name: firstNonEmpty(item.Name, metas[key].Name, item.Token), Kind: item.Type,
+				Token: item.Token, URL: href, Hint: "飞书云盘",
+			})
+		}
+	}
+	return matches, nil
+}
+
+func (s *Service) workspaceSearchWiki(ctx context.Context, query string) (workspaceCloudMatches, error) {
+	var spaces []WikiSpace
+	var nodes []WikiSearchNode
+	var spacesErr, nodesErr error
+	workspaceSearchBatch(2, func(i int) {
+		if i == 0 {
+			spaces, spacesErr = s.workspaceSearchWikiSpaces(ctx)
+		} else {
+			nodes, nodesErr = s.workspaceSearchWikiNodes(ctx, query)
+		}
+	})
+	result := workspaceCloudMatches{Items: []workspaceCloudMatch{}}
+	origin := workspaceFeishuOrigin(s.cfg.BaseURL)
+	spaceNames := map[string]string{}
+	for _, space := range spaces {
+		name := firstNonEmpty(space.Name, space.SpaceID)
+		spaceNames[space.SpaceID] = name
+		if workspaceNameMatches(name, query) && len(result.Items) < workspaceCloudSearchLimit {
+			result.Items = append(result.Items, workspaceCloudMatch{
+				Name: name, Kind: workspaceWiki, SpaceID: space.SpaceID, CanBind: true,
+				URL: origin + "/wiki/space/" + space.SpaceID, Hint: "知识库空间",
+			})
+		}
+	}
+	for _, node := range nodes {
+		result.Items = append(result.Items, workspaceCloudMatch{
+			Name: firstNonEmpty(node.Title, node.NodeToken), Kind: workspaceWiki, Token: node.NodeToken, SpaceID: node.SpaceID,
+			URL: node.URL, Hint: firstNonEmpty(spaceNames[node.SpaceID], node.SpaceID, "知识库节点"), CanBind: true,
+		})
+	}
+	switch {
+	case spacesErr != nil && nodesErr != nil && len(result.Items) == 0:
+		return result, nodesErr
+	case spacesErr != nil:
+		result.Warning = "部分知识库空间暂未搜到。"
+	case nodesErr != nil:
+		result.Warning = "部分知识库节点暂未搜到。"
+	}
+	return result, nil
+}
+
+func (s *Service) workspaceSearchWikiSpaces(ctx context.Context) ([]WikiSpace, error) {
+	var spaces []WikiSpace
+	seen := map[string]bool{}
+	for token, pageNumber := "", 0; pageNumber < 20; pageNumber++ {
+		page, err := s.api.WikiSpaces(ctx, token)
+		if err != nil {
+			return spaces, err
+		}
+		for _, space := range page.Items {
+			if keyRe.MatchString(space.SpaceID) && !seen[space.SpaceID] {
+				spaces = append(spaces, space)
+				seen[space.SpaceID] = true
+			}
+		}
+		if !page.HasMore || page.PageToken == "" || page.PageToken == token {
+			break
+		}
+		token = page.PageToken
+	}
+	return spaces, nil
+}
+
+func (s *Service) workspaceSearchWikiNodes(ctx context.Context, query string) ([]WikiSearchNode, error) {
+	var matches []WikiSearchNode
+	seen := map[string]bool{}
+	var searchErr error
+	for token, pageNumber := "", 0; len(matches) < workspaceCloudSearchLimit && pageNumber < 4; pageNumber++ {
+		page, err := s.api.WikiSearchNodes(ctx, query, "", token)
+		if err != nil {
+			searchErr = err
+			break
+		}
+		for _, node := range page.Items {
+			if keyRe.MatchString(node.NodeToken) && !seen[node.NodeToken] {
+				matches = append(matches, node)
+				seen[node.NodeToken] = true
+				if len(matches) == workspaceCloudSearchLimit {
+					break
+				}
+			}
+		}
+		if !page.HasMore || page.PageToken == "" || page.PageToken == token {
+			break
+		}
+		token = page.PageToken
+	}
+	var incomplete []*WikiSearchNode
+	for i := range matches {
+		node := &matches[i]
+		if node.Title == "" || node.URL == "" || node.SpaceID == "" {
+			incomplete = append(incomplete, node)
+		}
+	}
+	for start := 0; start < len(incomplete) && ctx.Err() == nil; start += workspaceSearchConcurrency {
+		batch := incomplete[start:min(start+workspaceSearchConcurrency, len(incomplete))]
+		workspaceSearchBatch(len(batch), func(i int) {
+			node := batch[i]
+			if detail, err := s.api.WikiNodeInfo(ctx, node.NodeToken); err == nil {
+				node.Title = firstNonEmpty(node.Title, detail.Title)
+				node.URL = firstNonEmpty(node.URL, detail.URL)
+				node.SpaceID = firstNonEmpty(node.SpaceID, detail.SpaceID)
+			}
+		})
+	}
+	for i := range matches {
+		node := &matches[i]
+		if ref, ok := driveRef(node.URL); !ok || ref.Type != "wiki" || ref.Token != node.NodeToken {
+			node.URL = wikiURL(s.cfg.BaseURL, node.NodeToken)
+		}
+	}
+	return matches, searchErr
 }
 
 func (s *Server) handleWorkspaceSpaces(w http.ResponseWriter, r *http.Request) {

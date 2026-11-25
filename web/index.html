@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="网页呆呆鸟">
-<link rel="stylesheet" href="style.css?v=workspace-links">
+<link rel="stylesheet" href="style.css?v=workspace-search">
 </head>
 <body>
 <header class="topbar">
@@ -150,47 +150,43 @@
       <button id="workspaceClose" type="button" class="btn icon" aria-label="关闭">✕</button>
     </div>
     <div id="workspaceSettings">
-      <div id="workspaceBindings" class="ws-list"></div>
-      <label class="ws-check"><input id="workspaceAttach" type="checkbox"> 发消息时默认附带群工作区路径</label>
-      <section class="ws-bind-panel" aria-label="绑定新工作区">
+      <section class="ws-current" aria-labelledby="workspaceCurrentTitle">
+        <h3 id="workspaceCurrentTitle">当前群已绑定</h3>
+        <div id="workspaceBindings" class="ws-list"></div>
+        <label class="ws-check"><input id="workspaceAttach" type="checkbox"> 发消息时默认附带群工作区路径</label>
+      </section>
+      <section class="ws-bind-panel" aria-labelledby="workspaceSelectTitle">
         <div class="ws-quick-link">
           <input id="workspaceLinkInput" type="url" placeholder="粘贴飞书知识库或云盘文件夹链接…" aria-label="飞书链接">
-          <button id="workspaceBindLink" type="button" class="btn sm primary">识别并绑定</button>
+          <button id="workspaceBindLink" type="button" class="btn sm">识别并绑定</button>
         </div>
-        <div class="ws-tabs" role="tablist" aria-label="绑定方式">
-          <button id="wsTabBtnLocal" type="button" class="ws-tab on" role="tab" aria-selected="true">电脑本地文件夹</button>
-          <button id="wsTabBtnDrive" type="button" class="ws-tab" role="tab" aria-selected="false">飞书云盘</button>
-          <button id="wsTabBtnWiki" type="button" class="ws-tab" role="tab" aria-selected="false">飞书知识库</button>
+        <h3 id="workspaceSelectTitle">选择要关联的工作区目录</h3>
+        <div id="workspaceTabs" class="ws-tabs" role="tablist" aria-label="工作区来源">
+          <button id="wsTabBtnDrive" type="button" class="ws-tab" role="tab" aria-controls="workspaceTabPanel" aria-selected="false" tabindex="-1">飞书云盘</button>
+          <button id="wsTabBtnWiki" type="button" class="ws-tab" role="tab" aria-controls="workspaceTabPanel" aria-selected="false" tabindex="-1">飞书知识库</button>
+          <button id="wsTabBtnLocal" type="button" class="ws-tab on" role="tab" aria-controls="workspaceTabPanel" aria-selected="true">电脑本地文件夹</button>
         </div>
-        <div id="wsTabLocal" class="ws-tab-panel">
-          <button id="workspacePick" type="button" class="btn primary ws-pick-btn">📂 打开电脑文件夹选择器</button>
-          <p id="workspacePickHint" class="hint ws-pick-hint" hidden></p>
-          <div id="workspaceLocalPlaces" class="ws-places" role="toolbar" aria-label="快捷入口"></div>
-          <nav id="workspaceLocalCrumbs" class="ws-crumbs" aria-label="路径"></nav>
-          <div id="workspaceLocalList" class="ws-list ws-browser-list"></div>
-          <button id="workspaceBindLocalDir" type="button" class="btn sm ws-bind-current" hidden>绑定当前目录</button>
-          <details class="ws-path-fallback">
-            <summary>输入路径…</summary>
-            <form id="workspacePathForm" class="ws-path-form">
-              <input id="workspacePathInput" type="text" placeholder="~/Desktop/项目 或完整路径" aria-label="文件夹路径">
-              <button type="submit" class="btn sm">前往</button>
-              <button id="workspacePathBind" type="button" class="btn sm">绑定此路径</button>
-            </form>
-          </details>
-        </div>
-        <div id="wsTabDrive" class="ws-tab-panel" hidden>
-          <input id="workspaceDriveFilter" type="search" placeholder="筛选文件夹…" aria-label="筛选云盘文件夹">
-          <nav id="workspaceDriveCrumbs" class="ws-crumbs" aria-label="云盘路径"></nav>
-          <div id="workspaceDriveList" class="ws-list ws-browser-list"></div>
-          <button id="workspaceDriveMore" type="button" class="btn sm" hidden>加载更多</button>
-          <button id="workspaceBindDriveDir" type="button" class="btn sm ws-bind-current" hidden>绑定当前文件夹</button>
-        </div>
-        <div id="wsTabWiki" class="ws-tab-panel" hidden>
-          <input id="workspaceWikiFilter" type="search" placeholder="筛选知识库或节点…" aria-label="筛选知识库">
-          <nav id="workspaceWikiCrumbs" class="ws-crumbs" aria-label="知识库路径"></nav>
-          <div id="workspaceWikiList" class="ws-list ws-browser-list"></div>
-          <button id="workspaceWikiMore" type="button" class="btn sm" hidden>加载更多</button>
-          <button id="workspaceBindWikiDir" type="button" class="btn sm ws-bind-current" hidden>绑定当前节点</button>
+        <div id="workspaceTabPanel" class="ws-tab-panel" role="tabpanel" aria-labelledby="wsTabBtnLocal">
+          <form id="workspaceSearchForm" class="ws-search" role="search">
+            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="4.75"/><path d="m12 12 4 4" stroke-linecap="round"/></svg>
+            <input id="workspaceSearch" type="search" aria-label="搜索工作区" autocomplete="off">
+            <button id="workspaceSearchClear" type="button" class="ws-clear" aria-label="清空搜索" hidden>✕</button>
+          </form>
+          <div id="workspaceLocalControls" class="ws-local-controls">
+            <button id="workspacePick" type="button" class="btn sm ws-pick-btn">📂 打开电脑文件夹选择器</button>
+            <p id="workspacePickHint" class="hint ws-pick-hint" hidden></p>
+            <div id="workspaceLocalPlaces" class="ws-places" aria-label="快捷入口"></div>
+            <details id="workspacePathFallback" class="ws-path-fallback">
+              <summary>输入路径…</summary>
+              <form id="workspacePathForm" class="ws-path-form">
+                <input id="workspacePathInput" type="text" placeholder="~/Desktop/项目 或完整路径" aria-label="文件夹路径">
+                <button type="submit" class="btn sm">前往</button>
+                <button id="workspacePathBind" type="button" class="btn sm">绑定此路径</button>
+              </form>
+            </details>
+          </div>
+          <div id="workspaceSelection" class="ws-browser-list" aria-label="可选择的工作区"></div>
+          <p class="hint ws-guide">展开逐层查找，点击「选择」关联目录，可继续选择更多。</p>
         </div>
       </section>
     </div>
@@ -285,7 +281,7 @@
     </div>
   </div>
 </div>
-<script src="app.js?v=workspace-links"></script>
+<script src="app.js?v=workspace-search"></script>
 <script src="pwa.js"></script>
 </body>
 </html>

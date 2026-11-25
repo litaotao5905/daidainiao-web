@@ -512,6 +512,138 @@ func TestWorkspaceLinksInCompose(t *testing.T) {
 	}
 }
 
+type workspaceSearchTestAPI struct {
+	API
+	noDocuments bool
+	nodeLookups atomic.Int32
+}
+
+func (a *workspaceSearchTestAPI) DriveList(ctx context.Context, folder, page string) (*DriveListPage, error) {
+	if folder == "mockDriveRoot" && page == "" {
+		return &DriveListPage{HasMore: true, NextPage: "folders2"}, nil
+	}
+	return a.API.DriveList(ctx, folder, page)
+}
+
+func (a *workspaceSearchTestAPI) DriveSearchObjects(ctx context.Context, query string, kinds []string, offset, count int) (*DriveSearchPage, error) {
+	if a.noDocuments {
+		return nil, fmt.Errorf("搜索权限未开通")
+	}
+	return a.API.DriveSearchObjects(ctx, query, kinds, offset, count)
+}
+
+func (a *workspaceSearchTestAPI) WikiSearchNodes(ctx context.Context, query, spaceID, pageToken string) (*WikiSearchPage, error) {
+	page, err := a.API.WikiSearchNodes(ctx, query, spaceID, pageToken)
+	if err == nil {
+		for i := range page.Items {
+			page.Items[i].Title, page.Items[i].URL, page.Items[i].SpaceID = "", "", ""
+		}
+	}
+	return page, err
+}
+
+func (a *workspaceSearchTestAPI) WikiNodeInfo(ctx context.Context, token string) (*WikiNodeDetail, error) {
+	a.nodeLookups.Add(1)
+	return a.API.WikiNodeInfo(ctx, token)
+}
+
+func TestWorkspaceCloudSearch(t *testing.T) {
+	s, svc := newTestServer(t)
+	mock := svc.api.(*MockAPI)
+	mock.mu.Lock()
+	mock.workspaceDrive = map[string][]DriveResource{
+		"mockWorkspaceReports": {mockDriveFolder("mockBudgetHistory", "历史预算")},
+	}
+	mock.mu.Unlock()
+	searchAPI := &workspaceSearchTestAPI{API: mock}
+	svc.api = searchAPI
+	search := "/api/workspace/cloud/search?kind="
+	driveSearch := search + workspaceDrive + "&q=" + url.QueryEscape("预算")
+	drive := workspaceJSON[workspaceCloudMatches](t, workspaceHTTP(s, "GET", driveSearch, nil, false, false), 200)
+	if len(drive.Items) != 2 || drive.Warning != "" {
+		t.Fatalf("drive results: %+v", drive)
+	}
+	folder, file := drive.Items[0], drive.Items[1]
+	if !folder.CanBind || folder.Token != "mockBudgetHistory" || folder.URL == "" || folder.Hint != "我的空间 / 示例项目资料 / 归档" ||
+		file.CanBind || file.Token != mockWorkspaceBudget.Token || file.URL != mockWorkspaceBudget.URL {
+		t.Fatalf("folder and file search results: %+v", drive.Items)
+	}
+	searchAPI.noDocuments = true
+	partial := workspaceJSON[workspaceCloudMatches](t, workspaceHTTP(s, "GET", driveSearch, nil, false, true), 200)
+	if len(partial.Items) != 1 || partial.Items[0] != folder {
+		t.Fatalf("document search failure dropped the folder result: %+v", partial)
+	}
+
+	wikiSearch := search + workspaceWiki + "&q=" + url.QueryEscape("项目")
+	wiki := workspaceJSON[workspaceCloudMatches](t, workspaceHTTP(s, "GET", wikiSearch, nil, false, true), 200)
+	if len(wiki.Items) != 2 || wiki.Warning != "" {
+		t.Fatalf("wiki results: %+v", wiki)
+	}
+	space, node := wiki.Items[0], wiki.Items[1]
+	if !space.CanBind || space.SpaceID != "mockWikiSpace" || space.Token != "" || space.URL == "" ||
+		!node.CanBind || node.Token != "mockWikiHome" || node.SpaceID != space.SpaceID || node.Name != "项目首页" ||
+		node.Hint != space.Name || node.URL != "https://mock.feishu.cn/wiki/mockWikiHome" || searchAPI.nodeLookups.Load() != 1 {
+		t.Fatalf("space and hydrated wiki node: %+v (lookups: %d)", wiki.Items, searchAPI.nodeLookups.Load())
+	}
+	ws := workspaceBind(t, s, workspaceTestChat, ChatWorkspace{Items: []WorkspaceItem{
+		{Kind: folder.Kind, Token: folder.Token, Name: folder.Name, URL: folder.URL},
+		{Kind: space.Kind, SpaceID: space.SpaceID, Name: space.Name, URL: space.URL},
+		{Kind: node.Kind, Token: node.Token, SpaceID: node.SpaceID, Name: node.Name, URL: node.URL},
+		{URL: "https://example.feishu.cn/wiki/mockWikiHome"},
+	}})
+	if len(ws.Items) != 3 {
+		t.Fatalf("search results should bind independently and only once: %+v", ws.Items)
+	}
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", search+"unknown&q=x", nil, false, true), 400)
+	svc.auth.Logout()
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", driveSearch, nil, true, true), 401)
+}
+
+func TestWorkspaceFeishuSearchAPI(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer u-access" {
+			t.Errorf("expected user-authorized POST: %s %s", r.Method, r.URL)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		switch r.URL.Path {
+		case "/open-apis/suite/docs-api/search/object":
+			if body["search_key"] != "预算" || body["offset"] != float64(10) || body["count"] != float64(5) ||
+				fmt.Sprint(body["docs_types"]) != "[doc file]" {
+				t.Errorf("Drive search body: %+v", body)
+			}
+			fmt.Fprint(w, `{"code":0,"data":{"docs_entities":[{"docs_token":"doc1","docs_type":"docx","title":"项目预算","owner_id":"ou_creator"}],"has_more":true,"total":20}}`)
+		case "/open-apis/wiki/v1/nodes/search":
+			if body["query"] != "项目" || body["space_id"] != "space1" ||
+				r.URL.Query().Get("page_size") != "50" || r.URL.Query().Get("page_token") != "page1" {
+				t.Errorf("Wiki search request: query %s, body %+v", r.URL.RawQuery, body)
+			}
+			fmt.Fprint(w, `{"code":0,"data":{"items":[{"node_id":"node1","space_id":"space1","title":"项目首页","url":"https://demo.feishu.cn/wiki/node1","obj_type":8}],"has_more":true,"page_token":"page2"}}`)
+		default:
+			t.Errorf("unexpected API: %s", r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	cfg := realConfig(ts.URL)
+	auth := loggedInAuth(t, cfg, "u-access", "refresh", time.Hour)
+	client := NewFeishuClient(ts.URL, cfg.AppID, cfg.AppSecret, auth, "user")
+	client.gap = 0
+	ctx := context.WithValue(context.Background(), workspaceUserKey{}, "ou_me")
+	drive, err := client.DriveSearchObjects(ctx, "预算", []string{"doc", "file"}, 10, 5)
+	wantDoc := DriveResource{Token: "doc1", Type: "docx", Name: "项目预算", OwnerID: "ou_creator"}
+	if err != nil || !drive.HasMore || drive.Total != 20 || len(drive.Items) != 1 || drive.Items[0] != wantDoc {
+		t.Fatalf("parsed Drive results: %+v %v", drive, err)
+	}
+	wiki, err := client.WikiSearchNodes(ctx, "项目", "space1", "page1")
+	wantNode := WikiSearchNode{NodeToken: "node1", SpaceID: "space1", Title: "项目首页", URL: "https://demo.feishu.cn/wiki/node1"}
+	if err != nil || !wiki.HasMore || wiki.PageToken != "page2" || len(wiki.Items) != 1 || wiki.Items[0] != wantNode {
+		t.Fatalf("parsed Wiki results: %+v %v", wiki, err)
+	}
+}
+
 func TestWorkspaceFeishuAPI(t *testing.T) {
 	var polls atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

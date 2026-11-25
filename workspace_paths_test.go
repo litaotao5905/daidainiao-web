@@ -8,6 +8,64 @@ import (
 	"time"
 )
 
+func TestWorkspaceLocalSearch(t *testing.T) {
+	s, svc := newTestServer(t)
+	s.docker = false
+	host := t.TempDir()
+	container := t.TempDir()
+	download := t.TempDir()
+	hostDownload := filepath.Join(t.TempDir(), "Feishu")
+	s.cfg.HostHome, s.cfg.ContainerHome = host, container
+	s.cfg.HostDownloadDir, s.cfg.DownloadDir = hostDownload, download
+	svc.cfg = s.cfg
+	for _, path := range []string{
+		filepath.Join(container, "Desktop", "Match-top"),
+		filepath.Join(container, "Desktop", "branch", "MATCH-nested"),
+		filepath.Join(container, "Desktop", ".Match-hidden", "Match-child"),
+		filepath.Join(container, "Desktop", "a", "b", "c", "d", "Match-too-deep"),
+		filepath.Join(container, "Documents", "Match-docs"),
+		filepath.Join(container, "Downloads", "Match-downloads"),
+		filepath.Join(download, "Match-feishu"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(container, "Desktop", "Match-file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	search := "/api/workspace/local/search?q=mAtCh"
+	scoped := search + "&dir=" + url.QueryEscape(filepath.Join(host, "Desktop"))
+	got := workspaceJSON[[]workspaceLocalMatch](t, workspaceHTTP(s, "GET", scoped, nil, true, true), 200)
+	if len(got) != 2 || got[0] != (workspaceLocalMatch{"Match-top", "~/Desktop/Match-top", "~/Desktop"}) ||
+		got[1] != (workspaceLocalMatch{"MATCH-nested", "~/Desktop/branch/MATCH-nested", "~/Desktop/branch"}) {
+		t.Fatalf("scoped search: %+v", got)
+	}
+	got = workspaceJSON[[]workspaceLocalMatch](t, workspaceHTTP(s, "GET", search, nil, true, true), 200)
+	if len(got) != 5 || got[1].Name != "Match-docs" || got[2].Name != "Match-downloads" ||
+		got[3].Path != filepath.Join(hostDownload, "Match-feishu") {
+		t.Fatalf("default roots: %+v", got)
+	}
+	roundTrip, err := svc.workspaceResolveContainer(got[3].Path)
+	if err != nil || roundTrip != filepath.Join(download, "Match-feishu") {
+		t.Fatalf("download result path could not be resolved: %q, %v", roundTrip, err)
+	}
+	if err := os.Symlink(download, filepath.Join(container, "Desktop", "Match-link")); err == nil {
+		got = workspaceJSON[[]workspaceLocalMatch](t, workspaceHTTP(s, "GET", scoped, nil, true, true), 200)
+		if len(got) != 2 {
+			t.Fatalf("search followed a link outside its starting directory: %+v", got)
+		}
+		workspaceJSON[apiError](t, workspaceHTTP(s, "GET", search+"&dir="+url.QueryEscape("~/Desktop/Match-link"), nil, true, true), 403)
+	}
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", search+"&dir="+url.QueryEscape("~/.."), nil, true, true), 403)
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", search+"&dir="+url.QueryEscape("~/Desktop/Missing"), nil, true, true), 404)
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", search+"&dir="+url.QueryEscape("~/Desktop/Match-file"), nil, true, true), 400)
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", scoped, nil, false, true), 403)
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", scoped, nil, true, false), 403)
+	svc.auth.Logout()
+	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", scoped, nil, true, true), 401)
+}
+
 func TestWorkspaceHostContainerMapping(t *testing.T) {
 	hostRoot := t.TempDir()
 	containerRoot := t.TempDir()

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +20,12 @@ type workspacePlace struct {
 	Label string `json:"label"`
 	Icon  string `json:"icon"`
 	Path  string `json:"path"`
+}
+
+type workspaceLocalMatch struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Hint string `json:"hint"`
 }
 
 func expandTildePath(path, home string) string {
@@ -52,17 +61,19 @@ func (s *Service) workspaceResolveContainer(input string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !s.workspaceMappingEnabled() {
-		return abs, nil
-	}
-	hostHome := filepath.Clean(s.cfg.HostHome)
-	containerHome := filepath.Clean(s.cfg.ContainerHome)
 	clean := filepath.Clean(abs)
-	if rel, err := filepath.Rel(containerHome, clean); err == nil && workspaceRelative(rel) {
-		return clean, nil
+	if s.workspaceMappingEnabled() {
+		if rel, err := filepath.Rel(s.cfg.ContainerHome, clean); err == nil && workspaceRelative(rel) {
+			return clean, nil
+		}
+		if rel, err := filepath.Rel(s.cfg.HostHome, clean); err == nil && workspaceRelative(rel) {
+			return filepath.Join(s.cfg.ContainerHome, rel), nil
+		}
 	}
-	if rel, err := filepath.Rel(hostHome, clean); err == nil && workspaceRelative(rel) {
-		return filepath.Join(containerHome, rel), nil
+	if s.cfg.HostDownloadDir != "" && s.cfg.DownloadDir != "" {
+		if rel, err := filepath.Rel(s.cfg.HostDownloadDir, clean); err == nil && workspaceRelative(rel) {
+			return filepath.Join(s.cfg.DownloadDir, rel), nil
+		}
 	}
 	return clean, nil
 }
@@ -207,6 +218,126 @@ func (s *Service) workspaceBrowseDir(input string) (map[string]any, error) {
 		"breadcrumbs": breadcrumbs,
 		"items":       items,
 	}, nil
+}
+
+func (s *Service) workspaceSearchLocalRoot(input string) (string, string, error) {
+	container, err := s.workspaceResolveContainer(input)
+	if err != nil {
+		return "", "", err
+	}
+	inHome := input == "~" || strings.HasPrefix(input, "~/") || strings.HasPrefix(input, `~\`)
+	if !inHome && !filepath.IsAbs(input) && !workspaceRelative(filepath.Clean(input)) {
+		return "", "", ErrOutsideDir
+	}
+	real, err := realDirectory(container)
+	if err != nil {
+		return "", "", err
+	}
+	roots := []string{s.cfg.ContainerHome}
+	if s.cfg.HostDownloadDir != "" {
+		roots = append(roots, s.cfg.DownloadDir)
+	}
+	if inHome {
+		home, err := s.workspaceResolveContainer("~")
+		if err != nil {
+			return "", "", err
+		}
+		rel, err := filepath.Rel(workspaceEvalClean(home), real)
+		if err != nil || !workspaceRelative(rel) {
+			return "", "", ErrOutsideDir
+		}
+	}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if rel, err := filepath.Rel(root, container); err == nil && workspaceRelative(rel) {
+			if rel, err := filepath.Rel(workspaceEvalClean(root), real); err != nil || !workspaceRelative(rel) {
+				return "", "", ErrOutsideDir
+			}
+		}
+	}
+	return container, real, nil
+}
+
+func (s *Service) workspaceSearchLocal(ctx context.Context, query, dir string) ([]workspaceLocalMatch, error) {
+	const maxDepth, maxDirs, maxResults = 4, 1200, 40
+	type directory struct {
+		path  string
+		real  string
+		depth int
+	}
+	roots := []string{dir}
+	if dir == "" {
+		roots = []string{"~/Desktop", "~/Documents", "~/Downloads"}
+		if s.cfg.DownloadDir != "" {
+			roots = append(roots, s.cfg.DownloadDir)
+		}
+	}
+	queue := []directory{}
+	seen := map[string]bool{}
+	for _, root := range roots {
+		path, real, err := s.workspaceSearchLocalRoot(root)
+		if err != nil {
+			if dir != "" {
+				return nil, err
+			}
+			continue
+		}
+		if !seen[real] {
+			queue = append(queue, directory{path: path, real: real})
+			seen[real] = true
+		}
+	}
+	matches := []workspaceLocalMatch{}
+	// Search descendants without following symlinks, including links to another search root.
+	for i := 0; i < len(queue) && len(matches) < maxResults; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		parent := queue[i]
+		if parent.depth > 0 && workspaceNameMatches(filepath.Base(parent.path), query) {
+			matches = append(matches, workspaceLocalMatch{
+				Name: filepath.Base(parent.path), Path: s.workspaceDisplayPath(parent.path),
+				Hint: s.workspaceDisplayPath(filepath.Dir(parent.path)),
+			})
+		}
+		if parent.depth == maxDepth || len(queue) == maxDirs || len(matches) == maxResults {
+			continue
+		}
+		f, err := os.Open(parent.real)
+		if err != nil {
+			if i == 0 && dir != "" {
+				return nil, err
+			}
+			continue
+		}
+		for ctx.Err() == nil && len(queue) < maxDirs {
+			entries, err := f.ReadDir(128)
+			for _, entry := range entries {
+				if !entry.IsDir() || workspaceHiddenDir(entry.Name()) {
+					continue
+				}
+				real := filepath.Join(parent.real, entry.Name())
+				if !seen[real] {
+					queue = append(queue, directory{filepath.Join(parent.path, entry.Name()), real, parent.depth + 1})
+					seen[real] = true
+				}
+				if len(queue) == maxDirs {
+					break
+				}
+			}
+			if err != nil {
+				if !errors.Is(err, io.EOF) && i == 0 && dir != "" {
+					f.Close()
+					return nil, err
+				}
+				break
+			}
+		}
+		f.Close()
+	}
+	return matches, ctx.Err()
 }
 
 func (s *Service) workspaceBreadcrumbs(real string) []workspaceBreadcrumb {

@@ -2787,9 +2787,9 @@
   window.addEventListener("focus", refreshOnReturn);
 
   // ---------- group workspace ----------
-  function workspaceRequest(path, body, method = "POST") {
+  function workspaceRequest(path, body, method = "POST", signal) {
     const send = async (fresh) => api(path, {
-      method, headers: { "Content-Type": "application/json", "X-FT-CSRF": await csrfToken(fresh) },
+      method, signal, headers: { "Content-Type": "application/json", "X-FT-CSRF": await csrfToken(fresh) },
       ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
     });
     return send(false).catch((e) => { if (/CSRF/.test(e.message)) return send(true); throw e; });
@@ -2888,40 +2888,54 @@
     return b;
   }
   function closeWorkspaceModal() {
+    const modal = state.workspaceModal;
+    if (modal && modal.mode === "settings") stopWorkspaceSearch(modal);
     $("workspaceModal").hidden = true;
-    if (state.workspaceModal && state.workspaceModal.focus && state.workspaceModal.focus.isConnected) state.workspaceModal.focus.focus();
+    if (modal && modal.focus && modal.focus.isConnected) modal.focus.focus();
     state.workspaceModal = null;
   }
   const wsKindLabel = { wiki: "知识库", feishu_folder: "飞书云盘", local_dir: "本地文件夹" };
+  const workspaceTabs = {
+    drive: { button: "wsTabBtnDrive", kind: "feishu_folder", placeholder: "搜索云盘文件夹、文档和文件" },
+    wiki: { button: "wsTabBtnWiki", kind: "wiki", placeholder: "搜索知识库空间和节点" },
+    local: { button: "wsTabBtnLocal", kind: "local_dir", placeholder: "搜索本地文件夹" },
+  };
   function setWorkspaceTab(modal, tab) {
     modal.tab = tab;
-    for (const [id, name] of [["local", "wsTabBtnLocal"], ["drive", "wsTabBtnDrive"], ["wiki", "wsTabBtnWiki"]]) {
+    for (const [id, info] of Object.entries(workspaceTabs)) {
       const on = tab === id;
-      $(name).classList.toggle("on", on);
-      $(name).setAttribute("aria-selected", String(on));
-      $("wsTab" + (id === "local" ? "Local" : id === "drive" ? "Drive" : "Wiki")).hidden = !on;
+      const button = $(info.button);
+      button.classList.toggle("on", on);
+      button.setAttribute("aria-selected", String(on));
+      button.tabIndex = on ? 0 : -1;
     }
-    if (tab === "local") ensureWorkspaceLocalBrowser(modal);
-    else if (tab === "drive") ensureWorkspaceDriveBrowser(modal);
-    else ensureWorkspaceWikiBrowser(modal);
+    $("workspaceLocalControls").hidden = tab !== "local";
+    $("workspaceTabPanel").setAttribute("aria-labelledby", workspaceTabs[tab].button);
+    const local = modal.browsers.local;
+    $("workspaceSearch").placeholder = tab === "local" && local.scope
+      ? "在「" + local.scopeLabel + "」中搜索文件夹"
+      : workspaceTabs[tab].placeholder;
+    if (tab === "local") loadWorkspacePlaces(modal);
+    refreshWorkspaceSearch(modal, true);
   }
-  function renderWorkspaceCrumbs(box, crumbs, onPick) {
-    box.replaceChildren();
-    (crumbs || []).forEach((crumb, i) => {
-      if (i) box.appendChild(el("span", null, "›"));
-      const b = el("button", "ws-crumb", crumb.name || crumb.path);
-      b.type = "button";
-      b.onclick = () => onPick(crumb);
-      box.appendChild(b);
-    });
+  function persistWorkspace(modal, changeItems, attachContext, quiet) {
+    const model = modal.model;
+    const previous = model.workspaceSave || Promise.resolve();
+    const save = previous.catch(() => {}).then(() => saveWorkspaceBindings(modal, changeItems, attachContext, quiet));
+    model.workspaceSave = save;
+    const release = () => { if (model.workspaceSave === save) model.workspaceSave = null; };
+    save.then(release, release);
+    return save;
   }
-  async function persistWorkspace(modal, items, attachContext, quiet) {
-    modal.saving = (modal.saving || 0) + 1;
-    if (!quiet) $("workspaceError").textContent = "正在保存…";
+  async function saveWorkspaceBindings(modal, changeItems, attachContext, quiet) {
+    const current = modal.model.data;
+    const items = changeItems(current.items);
+    if (!items) return;
+    if (state.workspaceModal === modal) $("workspaceError").textContent = quiet ? "" : "正在保存…";
     try {
       const data = await workspaceRequest("/api/workspace", {
         chat_id: modal.model.chatId,
-        attach_context: attachContext ?? $("workspaceAttach").checked,
+        attach_context: attachContext ?? current.attach_context,
         items,
       });
       const next = new Map(data.items.map((item) => [item.id, JSON.stringify([item.kind, item.token, item.space_id, item.local_path])]));
@@ -2929,31 +2943,37 @@
         if (next.get(branch.itemId) !== branch.binding) modal.model.tree.delete(key);
       }
       modal.model.data = data;
-      modal.items = data.items.map((item) => ({ ...item }));
-      if (state.workspaceModal === modal) renderWorkspaceBindings(modal);
+      if (state.workspaceModal === modal) {
+        $("workspaceError").textContent = "";
+        renderWorkspaceBindings(modal);
+        renderWorkspaceSelector(modal);
+      }
       updateWorkspaceViews(modal.model);
       if (!quiet) toast("工作区已更新");
       return data;
     } catch (e) {
       if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
       throw e;
-    } finally {
-      modal.saving = Math.max(0, (modal.saving || 1) - 1);
-      if (state.workspaceModal === modal && !modal.saving) $("workspaceError").textContent = "";
     }
   }
-  async function bindWorkspaceItem(modal, item, quiet) {
-    const exists = modal.items.some((entry) => entry.kind === item.kind && (entry.local_path === item.local_path || (entry.token && entry.token === item.token) || (entry.space_id && entry.space_id === item.space_id && !item.token)));
-    const items = exists ? modal.items : [...modal.items, item];
-    await persistWorkspace(modal, items, undefined, quiet);
+  function workspaceSelectionKey(item) {
+    return JSON.stringify([item.kind, item.local_path || item.token || item.space_id || item.url || "", Boolean(item.token)]);
+  }
+  function isWorkspaceSelected(items, item) {
+    const key = workspaceSelectionKey(item);
+    return items.some((entry) => workspaceSelectionKey(entry) === key || (item.url && item.url === entry.url));
+  }
+  function bindWorkspaceItem(modal, item, quiet = false) {
+    return persistWorkspace(modal, (items) => isWorkspaceSelected(items, item) ? null : [...items, item], undefined, quiet);
   }
   async function openWorkspaceModal(chatId, mode = "settings", source = null) {
     if (!chatId) return;
+    if (state.workspaceModal && state.workspaceModal.mode === "settings") stopWorkspaceSearch(state.workspaceModal);
     const model = workspaceModel(chatId);
     const modal = {
-      model, mode, source, items: [], tab: "local", focus: document.activeElement,
-      local: { dir: "", places: null, gen: 0 }, drive: { token: "", crumbs: [], page: "", gen: 0 },
-      wiki: { spaceId: "", node: "", crumbs: [], page: "", gen: 0 },
+      model, mode, source, tab: "local", focus: document.activeElement,
+      browsers: { local: { roots: new Map() }, drive: { root: {} }, wiki: { root: {} } },
+      search: { query: "", sequence: 0 },
     };
     state.workspaceModal = modal;
     $("workspaceError").textContent = "";
@@ -2961,6 +2981,7 @@
     $("workspaceLinkInput").value = "";
     $("workspaceTitle").textContent = (mode === "settings" ? "群工作区" : mode === "transfer" ? "转存到工作区" : "引用工作区") + " · " + workspaceChatName(chatId);
     $("workspaceSettings").hidden = mode !== "settings";
+    $("workspaceSettings").inert = true;
     $("workspacePickerTree").hidden = mode === "settings";
     $("workspaceActions").hidden = mode !== "settings";
     $("workspaceModal").hidden = false;
@@ -2971,6 +2992,13 @@
       return;
     }
     $("workspaceBindings").replaceChildren(el("div", "loading", "加载工作区…"));
+    $("workspaceSelection").replaceChildren();
+    $("workspaceLocalPlaces").replaceChildren();
+    $("workspaceSearch").value = "";
+    $("workspaceSearchClear").hidden = true;
+    $("workspacePathInput").value = "";
+    $("workspacePathFallback").open = false;
+    if (model.workspaceSave) await model.workspaceSave.catch(() => {});
     if (!model.data) await loadWorkspace(model);
     if (state.workspaceModal !== modal) return;
     if (!model.data) {
@@ -2978,16 +3006,17 @@
       $("workspaceError").textContent = model.error || "无法加载工作区";
       return;
     }
-    modal.items = model.data.items.map((item) => ({ ...item }));
     $("workspaceAttach").checked = model.data.attach_context;
+    $("workspaceSettings").inert = false;
     renderWorkspaceBindings(modal);
     setWorkspaceTab(modal, "local");
   }
   function renderWorkspaceBindings(modal) {
     const list = $("workspaceBindings");
     list.replaceChildren();
-    if (!modal.items.length) list.appendChild(el("p", "hint", "此群还没有绑定目录。"));
-    for (const item of modal.items) {
+    const items = modal.model.data.items;
+    if (!items.length) list.appendChild(el("p", "hint", "此群还没有绑定目录。"));
+    for (const item of items) {
       const row = el("div", "ws-binding");
       const input = el("input");
       input.value = item.name || "";
@@ -2996,169 +3025,297 @@
       const saveName = () => {
         const name = input.value.trim();
         if (name === item.name) return;
-        item.name = name;
-        persistWorkspace(modal, modal.items, undefined, true).catch(() => {});
+        persistWorkspace(modal, (entries) => entries.map((entry) => entry.id === item.id ? { ...entry, name } : entry), undefined, true).catch(() => {});
       };
       input.onchange = saveName;
-      input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); saveName(); } };
+      input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } };
       const path = item.local_path || item.url || wsKindLabel[item.kind];
+      const description = el("div", "hint ws-binding-path", path);
+      description.title = path;
       row.append(input, workspaceButton("移除", () => {
-        persistWorkspace(modal, modal.items.filter((entry) => entry !== item), undefined, false).catch(() => {});
-      }), el("div", "hint ws-binding-path", path));
+        persistWorkspace(modal, (entries) => entries.filter((entry) => entry.id !== item.id), undefined, false).catch(() => {});
+      }, "ws-action"), description);
       list.appendChild(row);
     }
   }
-  async function ensureWorkspaceLocalBrowser(modal) {
-    if (!modal.local.places) {
-      try {
-        const p = await workspaceRequest(workspaceURL("/local/places", {}), null, "GET");
-        if (state.workspaceModal !== modal) return;
-        modal.local.places = p.items || [];
-        const bar = $("workspaceLocalPlaces");
-        bar.replaceChildren();
-        for (const place of modal.local.places) {
-          bar.appendChild(workspaceButton((place.icon ? place.icon + " " : "") + place.label, () => browseWorkspaceLocal(modal, place.path), "btn sm ws-place"));
+  async function loadWorkspacePlaces(modal) {
+    const local = modal.browsers.local;
+    if (local.placesLoaded) return;
+    local.placesLoaded = true;
+    const bar = $("workspaceLocalPlaces");
+    try {
+      const data = await workspaceRequest(workspaceURL("/local/places", {}), null, "GET");
+      if (state.workspaceModal !== modal) return;
+      bar.replaceChildren();
+      for (const place of data.items || []) {
+        bar.appendChild(workspaceButton(place.label, () => setWorkspaceLocalRoot(modal, place.path, place.label), "ws-place"));
+      }
+    } catch (e) {
+      if (state.workspaceModal === modal) bar.replaceChildren(el("span", "hint", e.message));
+    }
+  }
+
+  function setWorkspaceLocalRoot(modal, path, name) {
+    const local = modal.browsers.local;
+    if (!local.roots.has(path)) local.roots.set(path, { requestPath: path, label: name, expanded: true });
+    local.root = local.roots.get(path);
+    local.scope = path === "~" ? "" : path;
+    local.scopeLabel = name || path;
+    $("workspaceSearch").placeholder = local.scope
+      ? "在「" + local.scopeLabel + "」中搜索文件夹"
+      : workspaceTabs.local.placeholder;
+    refreshWorkspaceSearch(modal, true);
+  }
+
+  function ensureWorkspaceSelectionRoot(modal) {
+    const browser = modal.browsers[modal.tab];
+    if (!browser.root) {
+      browser.root = { requestPath: "~", label: "个人主目录", expanded: true };
+      browser.roots.set("~", browser.root);
+    }
+    const root = browser.root;
+    if (!root.items && !root.loading && !root.error) loadWorkspaceSelectionBranch(modal, root);
+    else renderWorkspaceSelector(modal);
+  }
+
+  async function loadWorkspaceSelectionBranch(modal, branch, more = false) {
+    if (branch.loading) return;
+    const tab = modal.tab;
+    const kind = workspaceTabs[tab].kind;
+    const item = branch.item;
+    branch.loading = true;
+    branch.error = "";
+    branch.retryMore = more;
+    renderWorkspaceSelector(modal);
+    try {
+      const path = tab === "local"
+        ? workspaceURL("/local/browse", { dir: branch.requestPath || item.local_path })
+        : workspaceURL("/cloud/browse", {
+            kind, token: tab === "drive" && item ? item.token : "",
+            space_id: item && item.space_id || "", node: tab === "wiki" && item && item.token || "",
+            page_token: more ? branch.next : "",
+          });
+      const data = await workspaceRequest(path, null, "GET");
+      if (tab === "local") {
+        if ((branch.ancestors || []).includes(data.dir)) throw new Error("此链接指向已展开的上级目录");
+        branch.dir = data.dir;
+        branch.parent = data.parent;
+        if (!item) {
+          const crumbs = data.breadcrumbs || [];
+          branch.item = { kind, local_path: data.dir, name: branch.label || (crumbs.length && crumbs[crumbs.length - 1].name) || data.dir };
+        } else {
+          item.local_path = data.dir;
         }
-      } catch (e) {
-        $("workspaceLocalPlaces").replaceChildren(el("span", "hint", e.message));
+      } else if (tab === "drive" && !item && data.parent && data.parent.token) {
+        branch.rootBinding = { kind, token: data.parent.token, name: "我的空间" };
       }
-    }
-    if (!modal.local.dir) browseWorkspaceLocal(modal, "");
-  }
-  async function browseWorkspaceLocal(modal, dir) {
-    const gen = ++modal.local.gen;
-    const box = $("workspaceLocalList");
-    box.replaceChildren(el("div", "loading", "正在读取目录…"));
-    $("workspaceBindLocalDir").hidden = true;
-    try {
-      const data = await workspaceRequest(workspaceURL("/local/browse", { dir }), null, "GET");
-      if (state.workspaceModal !== modal || gen !== modal.local.gen) return;
-      modal.local.dir = data.dir;
-      renderWorkspaceCrumbs($("workspaceLocalCrumbs"), data.breadcrumbs, (crumb) => browseWorkspaceLocal(modal, crumb.path));
-      box.replaceChildren();
-      for (const item of data.items || []) {
-        const row = el("div", "ws-browser-row");
-        const name = workspaceButton("📁 " + item.name, () => browseWorkspaceLocal(modal, item.path), "ws-browser-name");
-        row.append(name, workspaceButton("绑定", () => bindWorkspaceItem(modal, { kind: "local_dir", local_path: item.path, name: item.name }, false), "btn sm"));
-        box.appendChild(row);
+      if (!more) branch.items = [];
+      const existing = new Set(branch.items.map((child) => workspaceSelectionKey(child.item)));
+      for (const entry of data.items || []) {
+        const selection = { kind, name: entry.name, local_path: entry.path, url: entry.url, token: entry.token, space_id: entry.space_id };
+        const key = workspaceSelectionKey(selection);
+        if (existing.has(key)) continue;
+        existing.add(key);
+        branch.items.push({
+          item: selection, key, expandable: tab === "local" || entry.has_children,
+          ancestors: tab === "local" ? [...(branch.ancestors || []), branch.dir] : undefined,
+        });
       }
-      if (!(data.items || []).length) box.appendChild(el("p", "hint", "此处没有子文件夹。"));
-      const bindCurrent = $("workspaceBindLocalDir");
-      bindCurrent.hidden = false;
-      bindCurrent.textContent = "绑定当前目录 · " + data.dir;
-      bindCurrent.onclick = () => bindWorkspaceItem(modal, { kind: "local_dir", local_path: data.dir, name: data.dir.split("/").pop() || data.dir }, false);
+      branch.next = data.has_more && (!more || data.next_page_token !== branch.next) ? data.next_page_token : "";
     } catch (e) {
-      if (gen === modal.local.gen) box.replaceChildren(el("div", "banner err", e.message));
+      branch.error = e.message;
+    } finally {
+      branch.loading = false;
+      if (state.workspaceModal === modal && modal.tab === tab && !modal.search.query) renderWorkspaceSelector(modal);
     }
   }
-  async function ensureWorkspaceDriveBrowser(modal) {
-    if (!modal.drive.token) modal.drive = { token: "", crumbs: [{ name: "我的云空间", token: "" }], page: "", gen: modal.drive.gen || 0 };
-    browseWorkspaceDrive(modal, modal.drive.token, false);
+
+  function stopWorkspaceSearch(modal) {
+    const search = modal.search;
+    clearTimeout(search.timer);
+    if (search.controller) search.controller.abort();
+    search.controller = null;
+    return ++search.sequence;
   }
-  async function browseWorkspaceDrive(modal, token, more) {
-    const gen = ++modal.drive.gen;
-    const box = $("workspaceDriveList");
-    if (!more) box.replaceChildren(el("div", "loading", "正在读取云盘…"));
-    $("workspaceDriveMore").hidden = true;
+
+  function refreshWorkspaceSearch(modal, immediately) {
+    const search = modal.search, input = $("workspaceSearch");
+    const sequence = stopWorkspaceSearch(modal);
+    search.query = input.value.trim();
+    $("workspaceSearchClear").hidden = !input.value;
+    if (!search.query) {
+      ensureWorkspaceSelectionRoot(modal);
+      return;
+    }
+    search.items = [];
+    search.warning = "";
+    search.error = "";
+    search.loading = true;
+    renderWorkspaceSelector(modal);
+    if (immediately) runWorkspaceSearch(modal, sequence);
+    else search.timer = setTimeout(() => runWorkspaceSearch(modal, sequence), 300);
+  }
+
+  async function runWorkspaceSearch(modal, sequence) {
+    const search = modal.search;
+    const active = () => state.workspaceModal === modal && search.sequence === sequence;
+    if (!active()) return;
+    const tab = modal.tab, q = search.query;
+    const kind = workspaceTabs[tab].kind;
+    const controller = new AbortController();
+    search.controller = controller;
     try {
-      const data = await workspaceRequest(workspaceURL("/cloud/browse", { kind: "feishu_folder", token, page_token: more ? modal.drive.page : "" }), null, "GET");
-      if (state.workspaceModal !== modal || gen !== modal.drive.gen) return;
-      modal.drive.token = token || (data.parent && data.parent.token) || "";
-      modal.drive.page = data.has_more ? data.next_page_token : "";
-      if (!modal.drive.crumbs.length) {
-        modal.drive.crumbs = [{ name: "我的云空间", token: modal.drive.token }];
-      } else if (!token && modal.drive.crumbs.length === 1 && !modal.drive.crumbs[0].token) {
-        modal.drive.crumbs[0].token = modal.drive.token;
-      }
-      renderWorkspaceCrumbs($("workspaceDriveCrumbs"), modal.drive.crumbs, (crumb) => {
-        const idx = modal.drive.crumbs.indexOf(crumb);
-        if (idx >= 0) modal.drive.crumbs = modal.drive.crumbs.slice(0, idx + 1);
-        browseWorkspaceDrive(modal, crumb.token, false);
-      });
-      const filter = $("workspaceDriveFilter").value.trim().toLowerCase();
-      if (!more) box.replaceChildren();
-      for (const item of (data.items || []).filter((row) => !filter || (row.name || "").toLowerCase().includes(filter))) {
-        const row = el("div", "ws-browser-row");
-        const name = workspaceButton("📁 " + item.name, () => {
-          modal.drive.crumbs = [...modal.drive.crumbs, { name: item.name, token: item.token }];
-          browseWorkspaceDrive(modal, item.token, false);
-        }, "ws-browser-name");
-        row.append(name, workspaceButton("绑定", () => bindWorkspaceItem(modal, { kind: "feishu_folder", token: item.token, name: item.name, url: item.url }, false), "btn sm"));
-        box.appendChild(row);
-      }
-      if (!more && !(data.items || []).length) box.appendChild(el("p", "hint", "没有子文件夹。"));
-      const currentCrumb = modal.drive.crumbs[modal.drive.crumbs.length - 1];
-      const currentDriveName = (currentCrumb && currentCrumb.name) || "云盘文件夹";
-      const bindCurrent = $("workspaceBindDriveDir");
-      bindCurrent.hidden = !modal.drive.token;
-      bindCurrent.textContent = modal.drive.token && modal.drive.crumbs.length > 1
-        ? "绑定当前文件夹 · " + currentDriveName
-        : "绑定「我的云空间」根目录";
-      bindCurrent.onclick = () => bindWorkspaceItem(modal, {
-        kind: "feishu_folder",
-        token: modal.drive.token,
-        name: currentDriveName,
-      }, false);
-      const moreBtn = $("workspaceDriveMore");
-      moreBtn.hidden = !data.has_more;
-      moreBtn.onclick = () => browseWorkspaceDrive(modal, modal.drive.token, true);
+      const local = tab === "local";
+      const path = local
+        ? workspaceURL("/local/search", { q, dir: modal.browsers.local.scope || "" })
+        : workspaceURL("/cloud/search", { q, kind });
+      const data = await workspaceRequest(path, null, "GET", controller.signal);
+      if (!active()) return;
+      search.items = local
+        ? data.map((item) => ({ ...item, kind, local_path: item.path, can_bind: true }))
+        : data.items;
+      search.warning = data.warning || "";
     } catch (e) {
-      if (gen === modal.drive.gen && !more) box.replaceChildren(el("div", "banner err", e.message));
+      if (active()) search.error = e.message;
+    } finally {
+      if (active()) {
+        search.loading = false;
+        search.controller = null;
+        renderWorkspaceSelector(modal);
+      }
     }
   }
-  async function ensureWorkspaceWikiBrowser(modal) {
-    if (!modal.wiki.crumbs.length) modal.wiki.crumbs = [{ name: "全部知识库", space_id: "", node: "" }];
-    browseWorkspaceWiki(modal, modal.wiki.spaceId, modal.wiki.node, false);
+
+  function workspaceSelectionAction(modal, item, label = "选择", focusKey = workspaceSelectionKey(item)) {
+    const selected = isWorkspaceSelected(modal.model.data.items, item);
+    const button = workspaceButton(selected ? "已选择" : label, () => {
+      if (!selected) bindWorkspaceItem(modal, item).catch(() => {});
+    }, selected ? "ws-action ws-selected" : "ws-action");
+    button.dataset.workspaceFocus = "select:" + focusKey;
+    button.setAttribute("aria-label", (selected ? "已选择 " : "选择 ") + item.name);
+    if (selected) button.setAttribute("aria-disabled", "true");
+    return button;
   }
-  async function browseWorkspaceWiki(modal, spaceId, node, more) {
-    const gen = ++modal.wiki.gen;
-    const box = $("workspaceWikiList");
-    if (!more) box.replaceChildren(el("div", "loading", "正在读取知识库…"));
-    $("workspaceWikiMore").hidden = true;
-    try {
-      const data = await workspaceRequest(workspaceURL("/cloud/browse", { kind: "wiki", space_id: spaceId, node, page_token: more ? modal.wiki.page : "" }), null, "GET");
-      if (state.workspaceModal !== modal || gen !== modal.wiki.gen) return;
-      modal.wiki.spaceId = spaceId;
-      modal.wiki.node = node;
-      modal.wiki.page = data.has_more ? data.next_page_token : "";
-      renderWorkspaceCrumbs($("workspaceWikiCrumbs"), modal.wiki.crumbs, (crumb) => {
-        modal.wiki.crumbs = modal.wiki.crumbs.slice(0, modal.wiki.crumbs.indexOf(crumb) + 1);
-        browseWorkspaceWiki(modal, crumb.space_id || "", crumb.node || "", false);
-      });
-      const filter = $("workspaceWikiFilter").value.trim().toLowerCase();
-      if (!more) box.replaceChildren();
-      for (const item of (data.items || []).filter((row) => !filter || (row.name || "").toLowerCase().includes(filter))) {
-        const row = el("div", "ws-browser-row");
-        const enter = () => {
-          if (item.space_id && !item.token) {
-            modal.wiki.crumbs = [...modal.wiki.crumbs, { name: item.name, space_id: item.space_id, node: "" }];
-            browseWorkspaceWiki(modal, item.space_id, "", false);
-            return;
-          }
-          modal.wiki.crumbs = [...modal.wiki.crumbs, { name: item.name, space_id: item.space_id || spaceId, node: item.token }];
-          browseWorkspaceWiki(modal, item.space_id || spaceId, item.token, false);
-        };
-        row.append(workspaceButton((item.space_id && !item.token ? "📚 " : "📁 ") + item.name, enter, "ws-browser-name"),
-          workspaceButton("绑定", () => bindWorkspaceItem(modal, item.space_id && !item.token
-            ? { kind: "wiki", space_id: item.space_id, name: item.name, url: item.url }
-            : { kind: "wiki", space_id: item.space_id || spaceId, token: item.token, name: item.name, url: item.url }, false), "btn sm"));
-        box.appendChild(row);
-      }
-      if (!more && !(data.items || []).length) box.appendChild(el("p", "hint", "没有可浏览的子节点。"));
-      const wikiCrumb = modal.wiki.crumbs[modal.wiki.crumbs.length - 1];
-      const currentWikiName = (wikiCrumb && wikiCrumb.name) || (node ? "知识库节点" : "知识库");
-      const bindCurrent = $("workspaceBindWikiDir");
-      bindCurrent.hidden = !spaceId && !node;
-      bindCurrent.textContent = node ? "绑定当前节点 · " + currentWikiName : (spaceId ? "绑定整个知识库 · " + currentWikiName : "");
-      bindCurrent.onclick = () => bindWorkspaceItem(modal, node
-        ? { kind: "wiki", space_id: spaceId, token: node, name: currentWikiName }
-        : { kind: "wiki", space_id: spaceId, name: currentWikiName }, false);
-      const moreBtn = $("workspaceWikiMore");
-      moreBtn.hidden = !data.has_more;
-      moreBtn.onclick = () => browseWorkspaceWiki(modal, spaceId, node, true);
-    } catch (e) {
-      if (gen === modal.wiki.gen && !more) box.replaceChildren(el("div", "banner err", e.message));
+
+  function renderWorkspaceSelectionRow(modal, item, options = {}) {
+    const { branch, selectable = true, hint, key = workspaceSelectionKey(item) } = options;
+    const row = el("div", "ws-browser-row");
+    const expandable = branch && branch.expandable !== false;
+    const toggle = () => {
+      branch.expanded = !branch.expanded;
+      if (branch.expanded && !branch.items && !branch.loading) loadWorkspaceSelectionBranch(modal, branch);
+      else renderWorkspaceSelector(modal);
+    };
+    if (expandable) {
+      const arrow = workspaceButton(branch.expanded ? "▾" : "▸", toggle, "ws-selector-toggle");
+      arrow.dataset.workspaceFocus = "toggle:" + key;
+      arrow.setAttribute("aria-expanded", String(Boolean(branch.expanded)));
+      arrow.setAttribute("aria-label", (branch.expanded ? "收起 " : "展开 ") + item.name);
+      row.appendChild(arrow);
+    } else {
+      row.appendChild(el("span", "ws-selector-toggle"));
     }
+    const symbol = item.kind === "wiki" ? (item.token ? "📄" : "📚") : (selectable ? "📁" : "📄");
+    const icon = el("span", "ws-selector-icon", symbol);
+    icon.setAttribute("aria-hidden", "true");
+    const label = expandable ? workspaceButton("", toggle, "ws-browser-name") : el("div", "ws-browser-name");
+    if (expandable) {
+      label.dataset.workspaceFocus = "name:" + key;
+      label.setAttribute("aria-expanded", String(Boolean(branch.expanded)));
+    }
+    label.appendChild(el("span", "ws-selector-title", item.name));
+    if (hint) label.appendChild(el("span", "ws-selector-hint", hint));
+    label.title = hint ? item.name + " · " + hint : item.name;
+    row.append(icon, label);
+    if (selectable) {
+      row.appendChild(workspaceSelectionAction(modal, item, "选择", key));
+    } else {
+      const href = feishuWorkspaceHref(item.url);
+      if (href) {
+        const link = el("a", "ws-action", "打开");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.setAttribute("aria-label", "打开 " + item.name);
+        row.appendChild(link);
+      }
+    }
+    return row;
+  }
+
+  function renderWorkspaceSelectionBranch(modal, container, branch, key) {
+    for (const child of branch.items || []) {
+      const childKey = key + "/" + child.key;
+      const group = el("div", "ws-selector-group");
+      group.appendChild(renderWorkspaceSelectionRow(modal, child.item, { branch: child, key: childKey }));
+      if (child.expanded) {
+        const children = el("div", "ws-selector-children");
+        renderWorkspaceSelectionBranch(modal, children, child, childKey);
+        group.appendChild(children);
+      }
+      container.appendChild(group);
+    }
+    if (branch.loading) {
+      container.appendChild(el("p", "ws-selector-status", "正在加载…"));
+    } else if (branch.error) {
+      container.append(el("p", "ws-selector-status ws-error", branch.error),
+        workspaceButton("重试", () => loadWorkspaceSelectionBranch(modal, branch, branch.retryMore), "ws-action"));
+    } else if (branch.next) {
+      const more = workspaceButton("加载更多", () => loadWorkspaceSelectionBranch(modal, branch, true), "ws-action ws-selector-more");
+      more.dataset.workspaceFocus = "more:" + key;
+      container.appendChild(more);
+    } else if (!branch.items?.length) {
+      container.appendChild(el("p", "ws-selector-status", modal.tab === "wiki" ? "此处没有可浏览的知识库或节点" : "此处没有子文件夹"));
+    }
+  }
+
+  function renderWorkspaceSelector(modal) {
+    if (state.workspaceModal !== modal) return;
+    const box = $("workspaceSelection"), search = modal.search;
+    const searching = Boolean(search.query);
+    const view = searching ? "search:" + modal.tab : modal.tab;
+    const previousView = modal.selectorView;
+    if (previousView && workspaceTabs[previousView]) modal.browsers[previousView].scroll = box.scrollTop;
+    const scroll = previousView === view ? box.scrollTop : (searching ? 0 : modal.browsers[modal.tab].scroll || 0);
+    const focus = box.contains(document.activeElement) && document.activeElement.dataset.workspaceFocus;
+    modal.selectorView = view;
+    box.replaceChildren();
+    if (searching) {
+      if (search.loading) {
+        const status = el("p", "ws-selector-status", "正在搜索…");
+        status.setAttribute("role", "status");
+        box.appendChild(status);
+      } else if (search.error) {
+        box.append(el("p", "ws-selector-status ws-error", search.error),
+          workspaceButton("重试", () => refreshWorkspaceSearch(modal, true), "ws-action"));
+      } else {
+        if (search.warning) box.appendChild(el("p", "ws-selector-status ws-error", search.warning));
+        if (!search.items.length) box.appendChild(el("p", "ws-selector-status", "未找到匹配结果"));
+        for (const item of search.items) {
+          box.appendChild(renderWorkspaceSelectionRow(modal, item, { selectable: item.can_bind, hint: item.hint }));
+        }
+      }
+    } else {
+      const root = modal.browsers[modal.tab].root;
+      if (!root) return;
+      if (modal.tab === "local" && root.item) {
+        if (root.parent) box.appendChild(workspaceButton("↑ 上一级", () => setWorkspaceLocalRoot(modal, root.parent), "ws-action ws-selector-more"));
+        box.appendChild(renderWorkspaceSelectionRow(modal, root.item, { branch: root, hint: root.dir }));
+        if (root.expanded) {
+          const children = el("div", "ws-selector-children");
+          renderWorkspaceSelectionBranch(modal, children, root, "root");
+          box.appendChild(children);
+        }
+      } else {
+        renderWorkspaceSelectionBranch(modal, box, root, "root");
+        if (root.rootBinding) box.appendChild(workspaceSelectionAction(modal, root.rootBinding, "选择「我的空间」"));
+      }
+    }
+    if (focus) {
+      const next = Array.from(box.querySelectorAll("[data-workspace-focus]")).find((node) => node.dataset.workspaceFocus === focus);
+      if (next) next.focus({ preventScroll: true });
+    }
+    box.scrollTop = scroll;
   }
   async function pickWorkspaceDirectory() {
     const modal = state.workspaceModal, button = $("workspacePick");
@@ -3189,7 +3346,7 @@
     }
     $("workspaceError").textContent = "";
     await bindWorkspaceItem(modal, { url }, false);
-    $("workspaceLinkInput").value = "";
+    if (state.workspaceModal === modal && $("workspaceLinkInput").value.trim() === url) $("workspaceLinkInput").value = "";
   }
 
   function workspaceTreeBranch(model, item, node) {
@@ -3527,17 +3684,41 @@
   $("workspaceAttach").onchange = () => {
     const modal = state.workspaceModal;
     if (!modal || modal.mode !== "settings") return;
-    persistWorkspace(modal, modal.items, $("workspaceAttach").checked, true).catch(() => {});
+    persistWorkspace(modal, (items) => items, $("workspaceAttach").checked, true).catch(() => {
+      if (state.workspaceModal === modal) $("workspaceAttach").checked = modal.model.data.attach_context;
+    });
   };
-  $("wsTabBtnLocal").onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, "local");
-  $("wsTabBtnDrive").onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, "drive");
-  $("wsTabBtnWiki").onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, "wiki");
-  $("workspaceDriveFilter").oninput = () => state.workspaceModal && browseWorkspaceDrive(state.workspaceModal, state.workspaceModal.drive.token, false);
-  $("workspaceWikiFilter").oninput = () => state.workspaceModal && browseWorkspaceWiki(state.workspaceModal, state.workspaceModal.wiki.spaceId, state.workspaceModal.wiki.node, false);
+  for (const [tab, info] of Object.entries(workspaceTabs)) {
+    $(info.button).onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, tab);
+  }
+  $("workspaceTabs").onkeydown = (e) => {
+    const modal = state.workspaceModal;
+    if (!modal || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const tabs = Object.keys(workspaceTabs);
+    const index = tabs.indexOf(modal.tab);
+    let next = 0;
+    if (e.key === "End") next = tabs.length - 1;
+    else if (e.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+    else if (e.key === "ArrowRight") next = (index + 1) % tabs.length;
+    setWorkspaceTab(modal, tabs[next]);
+    $(workspaceTabs[tabs[next]].button).focus();
+  };
+  $("workspaceSearch").oninput = () => state.workspaceModal && refreshWorkspaceSearch(state.workspaceModal, false);
+  $("workspaceSearchForm").onsubmit = (e) => {
+    e.preventDefault();
+    if (!e.isComposing && state.workspaceModal) refreshWorkspaceSearch(state.workspaceModal, true);
+  };
+  $("workspaceSearchClear").onclick = () => {
+    const input = $("workspaceSearch");
+    input.value = "";
+    input.focus();
+    if (state.workspaceModal) refreshWorkspaceSearch(state.workspaceModal, true);
+  };
   $("workspacePathForm").onsubmit = (e) => {
     e.preventDefault();
-    const modal = state.workspaceModal;
-    if (modal) browseWorkspaceLocal(modal, $("workspacePathInput").value.trim());
+    const modal = state.workspaceModal, path = $("workspacePathInput").value.trim();
+    if (modal && path) setWorkspaceLocalRoot(modal, path);
   };
   $("workspacePathBind").onclick = () => {
     const modal = state.workspaceModal, path = $("workspacePathInput").value.trim();
