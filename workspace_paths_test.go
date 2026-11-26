@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -135,18 +136,27 @@ func TestWorkspaceHostContainerMapping(t *testing.T) {
 		t.Fatalf("stage: %+v", stage)
 	}
 	s.noOpen = false
-	var revealed string
+	var command string
+	var revealed []string
 	s.opener.HostURL = ""
-	s.opener.Run = func(_ string, args []string, _ time.Duration) error {
-		revealed = args[len(args)-1]
+	s.opener.LookPath = func(name string) (string, error) { return name, nil }
+	s.opener.Run = func(name string, args []string, _ time.Duration) error {
+		command, revealed = name, args
 		return nil
 	}
 	workspaceJSON[map[string]bool](t, workspaceHTTP(s, "POST", "/api/workspace/reveal", workspaceFileRequest{
 		ChatID: workspaceTestChat, ItemID: item.ID, RelPath: "brief.txt",
 	}, true, true), 200)
 	want := svc.workspaceOpenerHostPath(filepath.Join(containerDesktop, "brief.txt"))
-	if revealed != want {
-		t.Fatalf("reveal host path: %q want %q", revealed, want)
+	switch command {
+	case "dbus-send":
+		u := url.URL{Scheme: "file", Path: filepath.ToSlash(want)}
+		want = "array:string:" + u.String()
+	case "explorer.exe":
+		want = "/select," + want
+	}
+	if !slices.Contains(revealed, want) {
+		t.Fatalf("reveal host path: %s %q want argument %q", command, revealed, want)
 	}
 	outside := t.TempDir()
 	workspaceJSON[apiError](t, workspaceHTTP(s, "GET", tree+"&node="+url.QueryEscape(filepath.Join("..", "..", "..", outside)), nil, true, true), 403)

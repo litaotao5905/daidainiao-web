@@ -1726,7 +1726,7 @@
     const i = $("replyInput");
     if (state.composerThread !== t.topic.thread_id) {
       state.composerThread = t.topic.thread_id;
-      workspaceAttachmentDefault("replyWorkspace", t.topic.chat_id, workspaceModel(t.topic.chat_id), true);
+      workspaceAttachmentDefault("replyWorkspace", t.topic.chat_id, workspaceModel(t.topic.chat_id));
       i.value = state.drafts[t.topic.thread_id] || "";
       state.mentions.length = 0; setReplyErr(null); replyMention.close();
       replyTray.reset(true);
@@ -2825,15 +2825,11 @@
     });
     return model.pending;
   }
-  function workspaceAttachmentDefault(id, chatId, model, reset = false) {
+  function workspaceAttachmentDefault(id, chatId, model) {
     const box = $(id);
-    if (reset || box.dataset.chatId !== chatId) {
-      box.dataset.chatId = chatId;
-      delete box.dataset.changed;
-      box.checked = false;
-    }
+    box.dataset.chatId = chatId;
     const hasLinks = !!(model && model.data && model.data.items.some((item) => item.kind !== "local_dir" && feishuWorkspaceHref(item.url)));
-    if (!box.dataset.changed && model && model.data) box.checked = hasLinks && !!model.data.attach_context;
+    box.checked = hasLinks && !!(model.attachPreference?.value ?? model.data.attach_context);
     box.disabled = !hasLinks;
   }
   function updateWorkspaceHeader() {
@@ -2852,12 +2848,15 @@
     }
     if (!$("ntModal").hidden && $("ntChat").value === model.chatId) workspaceAttachmentDefault("ntWorkspace", model.chatId, model);
     const modal = state.workspaceModal;
-    if (modal && modal.model === model && modal.mode !== "settings") renderWorkspacePicker();
+    if (modal && modal.model === model) {
+      if (modal.mode === "settings") renderWorkspaceSelector(modal);
+      else renderWorkspacePicker();
+    }
   }
   function workspaceNewTopicDefault() {
     const chatId = $("ntChat").value;
     const model = workspaceModel(chatId);
-    workspaceAttachmentDefault("ntWorkspace", chatId, model, true);
+    workspaceAttachmentDefault("ntWorkspace", chatId, model);
     if (chatId && !model.data) loadWorkspace(model);
   }
   function feishuWorkspaceHref(href) {
@@ -2894,7 +2893,6 @@
     if (modal && modal.focus && modal.focus.isConnected) modal.focus.focus();
     state.workspaceModal = null;
   }
-  const wsKindLabel = { wiki: "知识库", feishu_folder: "飞书云盘", local_dir: "本地文件夹" };
   const workspaceTabs = {
     drive: { button: "wsTabBtnDrive", kind: "feishu_folder", placeholder: "搜索云盘文件夹、文档和文件" },
     wiki: { button: "wsTabBtnWiki", kind: "wiki", placeholder: "搜索知识库空间和节点" },
@@ -2911,60 +2909,49 @@
     }
     $("workspaceLocalControls").hidden = tab !== "local";
     $("workspaceTabPanel").setAttribute("aria-labelledby", workspaceTabs[tab].button);
-    const local = modal.browsers.local;
-    $("workspaceSearch").placeholder = tab === "local" && local.scope
-      ? "在「" + local.scopeLabel + "」中搜索文件夹"
-      : workspaceTabs[tab].placeholder;
-    if (tab === "local") loadWorkspacePlaces(modal);
+    $("workspaceSearch").placeholder = workspaceTabs[tab].placeholder;
     refreshWorkspaceSearch(modal, true);
   }
-  function persistWorkspace(modal, changeItems, attachContext, quiet) {
-    const model = modal.model;
+  function persistWorkspace(model, changeItems, attachContext, quiet = false) {
     const previous = model.workspaceSave || Promise.resolve();
-    const save = previous.catch(() => {}).then(() => saveWorkspaceBindings(modal, changeItems, attachContext, quiet));
+    const save = previous.catch(() => {}).then(() => saveWorkspaceBindings(model, changeItems, attachContext, quiet));
     model.workspaceSave = save;
     const release = () => { if (model.workspaceSave === save) model.workspaceSave = null; };
     save.then(release, release);
     return save;
   }
-  async function saveWorkspaceBindings(modal, changeItems, attachContext, quiet) {
-    const current = modal.model.data;
+  async function saveWorkspaceBindings(model, changeItems, attachContext, quiet) {
+    const current = model.data;
+    const modal = state.workspaceModal;
+    const showStatus = !quiet && modal?.mode === "settings" && modal.model === model;
     const items = changeItems(current.items);
     if (!items) return;
-    if (state.workspaceModal === modal) $("workspaceError").textContent = quiet ? "" : "正在保存…";
+    if (showStatus) $("workspaceError").textContent = "正在保存…";
     try {
       const data = await workspaceRequest("/api/workspace", {
-        chat_id: modal.model.chatId,
+        chat_id: model.chatId,
         attach_context: attachContext ?? current.attach_context,
         items,
       });
       const next = new Map(data.items.map((item) => [item.id, JSON.stringify([item.kind, item.token, item.space_id, item.local_path])]));
-      for (const [key, branch] of modal.model.tree) {
-        if (next.get(branch.itemId) !== branch.binding) modal.model.tree.delete(key);
+      for (const [key, branch] of model.tree) {
+        if (next.get(branch.itemId) !== branch.binding) model.tree.delete(key);
       }
-      modal.model.data = data;
-      if (state.workspaceModal === modal) {
-        $("workspaceError").textContent = "";
-        renderWorkspaceBindings(modal);
-        renderWorkspaceSelector(modal);
-      }
-      updateWorkspaceViews(modal.model);
+      model.data = data;
+      if (showStatus && state.workspaceModal === modal) $("workspaceError").textContent = "";
+      updateWorkspaceViews(model);
       if (!quiet) toast("工作区已更新");
       return data;
     } catch (e) {
-      if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
+      if (showStatus && state.workspaceModal === modal) $("workspaceError").textContent = e.message;
       throw e;
     }
   }
   function workspaceSelectionKey(item) {
     return JSON.stringify([item.kind, item.local_path || item.token || item.space_id || item.url || "", Boolean(item.token)]);
   }
-  function isWorkspaceSelected(items, item) {
-    const key = workspaceSelectionKey(item);
-    return items.some((entry) => workspaceSelectionKey(entry) === key || (item.url && item.url === entry.url));
-  }
-  function bindWorkspaceItem(modal, item, quiet = false) {
-    return persistWorkspace(modal, (items) => isWorkspaceSelected(items, item) ? null : [...items, item], undefined, quiet);
+  function matchesWorkspaceSelection(entry, item) {
+    return workspaceSelectionKey(entry) === workspaceSelectionKey(item) || (item.url && item.url === entry.url);
   }
   async function openWorkspaceModal(chatId, mode = "settings", source = null) {
     if (!chatId) return;
@@ -2972,18 +2959,16 @@
     const model = workspaceModel(chatId);
     const modal = {
       model, mode, source, tab: "local", focus: document.activeElement,
-      browsers: { local: { roots: new Map() }, drive: { root: {} }, wiki: { root: {} } },
+      browsers: { local: { root: {} }, drive: { root: {} }, wiki: { root: {} } },
       search: { query: "", sequence: 0 },
     };
     state.workspaceModal = modal;
     $("workspaceError").textContent = "";
     $("workspacePickHint").hidden = true;
-    $("workspaceLinkInput").value = "";
     $("workspaceTitle").textContent = (mode === "settings" ? "群工作区" : mode === "transfer" ? "转存到工作区" : "引用工作区") + " · " + workspaceChatName(chatId);
     $("workspaceSettings").hidden = mode !== "settings";
     $("workspaceSettings").inert = true;
     $("workspacePickerTree").hidden = mode === "settings";
-    $("workspaceActions").hidden = mode !== "settings";
     $("workspaceModal").hidden = false;
     $("workspaceClose").focus();
     if (mode !== "settings") {
@@ -2991,91 +2976,43 @@
       renderWorkspacePicker();
       return;
     }
-    $("workspaceBindings").replaceChildren(el("div", "loading", "加载工作区…"));
-    $("workspaceSelection").replaceChildren();
-    $("workspaceLocalPlaces").replaceChildren();
+    $("workspaceSelection").replaceChildren(el("p", "ws-selector-status", "加载工作区…"));
     $("workspaceSearch").value = "";
     $("workspaceSearchClear").hidden = true;
-    $("workspacePathInput").value = "";
-    $("workspacePathFallback").open = false;
     if (model.workspaceSave) await model.workspaceSave.catch(() => {});
     if (!model.data) await loadWorkspace(model);
     if (state.workspaceModal !== modal) return;
     if (!model.data) {
-      $("workspaceBindings").replaceChildren();
+      $("workspaceSelection").replaceChildren();
       $("workspaceError").textContent = model.error || "无法加载工作区";
       return;
     }
-    $("workspaceAttach").checked = model.data.attach_context;
     $("workspaceSettings").inert = false;
-    renderWorkspaceBindings(modal);
     setWorkspaceTab(modal, "local");
   }
-  function renderWorkspaceBindings(modal) {
-    const list = $("workspaceBindings");
-    list.replaceChildren();
-    const items = modal.model.data.items;
-    if (!items.length) list.appendChild(el("p", "hint", "此群还没有绑定目录。"));
-    for (const item of items) {
-      const row = el("div", "ws-binding");
-      const input = el("input");
-      input.value = item.name || "";
-      input.placeholder = "名称（修改后回车保存）";
-      input.setAttribute("aria-label", "工作区名称");
-      const saveName = () => {
-        const name = input.value.trim();
-        if (name === item.name) return;
-        persistWorkspace(modal, (entries) => entries.map((entry) => entry.id === item.id ? { ...entry, name } : entry), undefined, true).catch(() => {});
-      };
-      input.onchange = saveName;
-      input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } };
-      const path = item.local_path || item.url || wsKindLabel[item.kind];
-      const description = el("div", "hint ws-binding-path", path);
-      description.title = path;
-      row.append(input, workspaceButton("移除", () => {
-        persistWorkspace(modal, (entries) => entries.filter((entry) => entry.id !== item.id), undefined, false).catch(() => {});
-      }, "ws-action"), description);
-      list.appendChild(row);
-    }
-  }
-  async function loadWorkspacePlaces(modal) {
-    const local = modal.browsers.local;
-    if (local.placesLoaded) return;
-    local.placesLoaded = true;
-    const bar = $("workspaceLocalPlaces");
+  async function loadWorkspacePlaces(modal, root) {
+    root.loading = true;
+    root.error = "";
+    renderWorkspaceSelector(modal);
     try {
       const data = await workspaceRequest(workspaceURL("/local/places", {}), null, "GET");
-      if (state.workspaceModal !== modal) return;
-      bar.replaceChildren();
-      for (const place of data.items || []) {
-        bar.appendChild(workspaceButton(place.label, () => setWorkspaceLocalRoot(modal, place.path, place.label), "ws-place"));
-      }
+      root.items = (data.items || []).map((place) => ({
+        item: { kind: "local_dir", name: place.label, local_path: place.path },
+        key: place.id,
+      }));
     } catch (e) {
-      if (state.workspaceModal === modal) bar.replaceChildren(el("span", "hint", e.message));
+      root.error = e.message;
+    } finally {
+      root.loading = false;
+      if (state.workspaceModal === modal && modal.tab === "local" && !modal.search.query) renderWorkspaceSelector(modal);
     }
-  }
-
-  function setWorkspaceLocalRoot(modal, path, name) {
-    const local = modal.browsers.local;
-    if (!local.roots.has(path)) local.roots.set(path, { requestPath: path, label: name, expanded: true });
-    local.root = local.roots.get(path);
-    local.scope = path === "~" ? "" : path;
-    local.scopeLabel = name || path;
-    $("workspaceSearch").placeholder = local.scope
-      ? "在「" + local.scopeLabel + "」中搜索文件夹"
-      : workspaceTabs.local.placeholder;
-    refreshWorkspaceSearch(modal, true);
   }
 
   function ensureWorkspaceSelectionRoot(modal) {
-    const browser = modal.browsers[modal.tab];
-    if (!browser.root) {
-      browser.root = { requestPath: "~", label: "个人主目录", expanded: true };
-      browser.roots.set("~", browser.root);
-    }
-    const root = browser.root;
-    if (!root.items && !root.loading && !root.error) loadWorkspaceSelectionBranch(modal, root);
-    else renderWorkspaceSelector(modal);
+    const root = modal.browsers[modal.tab].root;
+    if (root.items || root.loading || root.error) renderWorkspaceSelector(modal);
+    else if (modal.tab === "local") loadWorkspacePlaces(modal, root);
+    else loadWorkspaceSelectionBranch(modal, root);
   }
 
   async function loadWorkspaceSelectionBranch(modal, branch, more = false) {
@@ -3089,7 +3026,7 @@
     renderWorkspaceSelector(modal);
     try {
       const path = tab === "local"
-        ? workspaceURL("/local/browse", { dir: branch.requestPath || item.local_path })
+        ? workspaceURL("/local/browse", { dir: item.local_path })
         : workspaceURL("/cloud/browse", {
             kind, token: tab === "drive" && item ? item.token : "",
             space_id: item && item.space_id || "", node: tab === "wiki" && item && item.token || "",
@@ -3099,21 +3036,15 @@
       if (tab === "local") {
         if ((branch.ancestors || []).includes(data.dir)) throw new Error("此链接指向已展开的上级目录");
         branch.dir = data.dir;
-        branch.parent = data.parent;
-        if (!item) {
-          const crumbs = data.breadcrumbs || [];
-          branch.item = { kind, local_path: data.dir, name: branch.label || (crumbs.length && crumbs[crumbs.length - 1].name) || data.dir };
-        } else {
-          item.local_path = data.dir;
-        }
+        item.local_path = data.dir;
       } else if (tab === "drive" && !item && data.parent && data.parent.token) {
         branch.rootBinding = { kind, token: data.parent.token, name: "我的空间" };
       }
       if (!more) branch.items = [];
-      const existing = new Set(branch.items.map((child) => workspaceSelectionKey(child.item)));
+      const existing = new Set(branch.items.map((child) => child.key));
       for (const entry of data.items || []) {
         const selection = { kind, name: entry.name, local_path: entry.path, url: entry.url, token: entry.token, space_id: entry.space_id };
-        const key = workspaceSelectionKey(selection);
+        const key = tab === "local" ? entry.name : workspaceSelectionKey(selection);
         if (existing.has(key)) continue;
         existing.add(key);
         branch.items.push({
@@ -3167,7 +3098,7 @@
     try {
       const local = tab === "local";
       const path = local
-        ? workspaceURL("/local/search", { q, dir: modal.browsers.local.scope || "" })
+        ? workspaceURL("/local/search", { q, dir: "" })
         : workspaceURL("/cloud/search", { q, kind });
       const data = await workspaceRequest(path, null, "GET", controller.signal);
       if (!active()) return;
@@ -3187,13 +3118,17 @@
   }
 
   function workspaceSelectionAction(modal, item, label = "选择", focusKey = workspaceSelectionKey(item)) {
-    const selected = isWorkspaceSelected(modal.model.data.items, item);
+    const selected = modal.model.data.items.some((entry) => matchesWorkspaceSelection(entry, item));
     const button = workspaceButton(selected ? "已选择" : label, () => {
-      if (!selected) bindWorkspaceItem(modal, item).catch(() => {});
+      persistWorkspace(modal.model, (items) => {
+        const remaining = items.filter((entry) => !matchesWorkspaceSelection(entry, item));
+        if (selected) return remaining.length < items.length ? remaining : null;
+        return remaining.length === items.length ? [...items, item] : null;
+      }).catch(() => {});
     }, selected ? "ws-action ws-selected" : "ws-action");
     button.dataset.workspaceFocus = "select:" + focusKey;
-    button.setAttribute("aria-label", (selected ? "已选择 " : "选择 ") + item.name);
-    if (selected) button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-label", (selected ? "取消选择 " : "选择 ") + item.name);
+    button.setAttribute("aria-pressed", String(selected));
     return button;
   }
 
@@ -3258,8 +3193,10 @@
     if (branch.loading) {
       container.appendChild(el("p", "ws-selector-status", "正在加载…"));
     } else if (branch.error) {
-      container.append(el("p", "ws-selector-status ws-error", branch.error),
-        workspaceButton("重试", () => loadWorkspaceSelectionBranch(modal, branch, branch.retryMore), "ws-action"));
+      const retry = modal.tab === "local" && branch === modal.browsers.local.root
+        ? () => loadWorkspacePlaces(modal, branch)
+        : () => loadWorkspaceSelectionBranch(modal, branch, branch.retryMore);
+      container.append(el("p", "ws-selector-status ws-error", branch.error), workspaceButton("重试", retry, "ws-action"));
     } else if (branch.next) {
       const more = workspaceButton("加载更多", () => loadWorkspaceSelectionBranch(modal, branch, true), "ws-action ws-selector-more");
       more.dataset.workspaceFocus = "more:" + key;
@@ -3270,7 +3207,7 @@
   }
 
   function renderWorkspaceSelector(modal) {
-    if (state.workspaceModal !== modal) return;
+    if (state.workspaceModal !== modal || $("workspaceSettings").inert) return;
     const box = $("workspaceSelection"), search = modal.search;
     const searching = Boolean(search.query);
     const view = searching ? "search:" + modal.tab : modal.tab;
@@ -3297,19 +3234,8 @@
       }
     } else {
       const root = modal.browsers[modal.tab].root;
-      if (!root) return;
-      if (modal.tab === "local" && root.item) {
-        if (root.parent) box.appendChild(workspaceButton("↑ 上一级", () => setWorkspaceLocalRoot(modal, root.parent), "ws-action ws-selector-more"));
-        box.appendChild(renderWorkspaceSelectionRow(modal, root.item, { branch: root, hint: root.dir }));
-        if (root.expanded) {
-          const children = el("div", "ws-selector-children");
-          renderWorkspaceSelectionBranch(modal, children, root, "root");
-          box.appendChild(children);
-        }
-      } else {
-        renderWorkspaceSelectionBranch(modal, box, root, "root");
-        if (root.rootBinding) box.appendChild(workspaceSelectionAction(modal, root.rootBinding, "选择「我的空间」"));
-      }
+      renderWorkspaceSelectionBranch(modal, box, root, "root");
+      if (root.rootBinding) box.appendChild(workspaceSelectionAction(modal, root.rootBinding, "选择「我的空间」"));
     }
     if (focus) {
       const next = Array.from(box.querySelectorAll("[data-workspace-focus]")).find((node) => node.dataset.workspaceFocus === focus);
@@ -3325,30 +3251,19 @@
       const r = await workspaceRequest("/api/workspace/local/pick", {});
       if (state.workspaceModal !== modal) return;
       if (r.cancelled) return;
-      if (r.path) await bindWorkspaceItem(modal, { kind: "local_dir", local_path: r.path, name: r.path.split("/").pop() || r.path }, false);
-      else if (r.fallback) {
+      if (r.path) {
+        const item = { kind: "local_dir", local_path: r.path, name: r.path.split("/").pop() || r.path };
+        await persistWorkspace(modal.model, (items) => items.some((entry) => matchesWorkspaceSelection(entry, item)) ? null : [...items, item]);
+      } else if (r.fallback) {
         const hint = $("workspacePickHint");
         hint.hidden = false;
-        hint.textContent = r.reason || "无法打开系统文件夹选择器时，请使用下方快捷入口或浏览列表。";
+        hint.textContent = r.reason || "无法打开系统文件夹选择器时，请使用下方目录树。";
         setWorkspaceTab(modal, "local");
       }
     } catch (e) {
       if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
     } finally { button.disabled = false; }
   }
-  async function bindWorkspaceFromLink() {
-    const modal = state.workspaceModal;
-    if (!modal) return;
-    const url = $("workspaceLinkInput").value.trim();
-    if (!feishuWorkspaceHref(url) || !/\/(?:wiki|folder|drive\/folder)\//.test(new URL(url).pathname)) {
-      $("workspaceError").textContent = "请粘贴飞书知识库或云盘文件夹链接。";
-      return;
-    }
-    $("workspaceError").textContent = "";
-    await bindWorkspaceItem(modal, { url }, false);
-    if (state.workspaceModal === modal && $("workspaceLinkInput").value.trim() === url) $("workspaceLinkInput").value = "";
-  }
-
   function workspaceTreeBranch(model, item, node) {
     const key = JSON.stringify([item.id, node.root ? "" : node.rel_path || node.token]);
     if (!model.tree.has(key)) model.tree.set(key, {
@@ -3426,6 +3341,13 @@
         b.disabled = !state.dl.opener;
         row.appendChild(b);
       }
+    }
+    if (node.root && mode === "panel") {
+      const remove = workspaceButton("移除", () => {
+        persistWorkspace(model, (items) => items.filter((entry) => entry.id !== item.id)).catch((e) => toast(e.message, true));
+      }, "ws-action");
+      remove.setAttribute("aria-label", "移除 " + node.name);
+      row.appendChild(remove);
     }
     if (node.can_store && mode === "panel" && (item.kind !== "local_dir" || item.local_path)) {
       row.ondragover = (e) => {
@@ -3680,14 +3602,6 @@
   $("btnWorkspace").onclick = () => openWorkspaceModal(workspaceChat());
   $("workspaceClose").onclick = closeWorkspaceModal;
   $("workspacePick").onclick = pickWorkspaceDirectory;
-  $("workspaceBindLink").onclick = () => bindWorkspaceFromLink().catch(() => {});
-  $("workspaceAttach").onchange = () => {
-    const modal = state.workspaceModal;
-    if (!modal || modal.mode !== "settings") return;
-    persistWorkspace(modal, (items) => items, $("workspaceAttach").checked, true).catch(() => {
-      if (state.workspaceModal === modal) $("workspaceAttach").checked = modal.model.data.attach_context;
-    });
-  };
   for (const [tab, info] of Object.entries(workspaceTabs)) {
     $(info.button).onclick = () => state.workspaceModal && setWorkspaceTab(state.workspaceModal, tab);
   }
@@ -3717,15 +3631,6 @@
     input.value = "";
     input.focus();
     if (state.workspaceModal) refreshWorkspaceSearch(state.workspaceModal, true);
-  };
-  $("workspacePathForm").onsubmit = (e) => {
-    e.preventDefault();
-    const modal = state.workspaceModal, path = $("workspacePathInput").value.trim();
-    if (modal && path) setWorkspaceLocalRoot(modal, path);
-  };
-  $("workspacePathBind").onclick = () => {
-    const modal = state.workspaceModal, path = $("workspacePathInput").value.trim();
-    if (modal && path) bindWorkspaceItem(modal, { kind: "local_dir", local_path: path }, false).catch(() => {});
   };
   $("workspaceModal").onclick = (e) => { if (e.target === $("workspaceModal")) closeWorkspaceModal(); };
   let workspaceConflict = null;
@@ -3797,18 +3702,20 @@
     if (!$("wsConflictModal").hidden) { closeWorkspaceConflict(); return; }
     if (!$("workspaceModal").hidden) closeWorkspaceModal();
   });
-  $("workspaceClearCache").onclick = async () => {
-    if (!window.confirm("清理后，已打开的缓存文件链接将失效。继续清理？")) return;
-    const modal = state.workspaceModal, button = $("workspaceClearCache");
-    button.disabled = true;
-    try {
-      const r = await workspaceRequest("/api/workspace/preview_cache", {}, "DELETE");
-      toast(r.failed ? "已清理本地索引，" + r.failed + " 个云端文件删除失败" : "已清理 " + r.deleted + " 个飞书预览缓存", !!r.failed);
-    } catch (e) {
-      if (state.workspaceModal === modal) $("workspaceError").textContent = e.message;
-    } finally { button.disabled = false; }
+  $("replyWorkspace").onchange = $("ntWorkspace").onchange = (e) => {
+    const box = e.target;
+    const model = state.workspaces.get(box.dataset.chatId);
+    if (!model?.data) return;
+    const preference = { value: box.checked };
+    model.attachPreference = preference;
+    updateWorkspaceViews(model);
+    const finish = () => {
+      if (model.attachPreference !== preference) return;
+      delete model.attachPreference;
+      updateWorkspaceViews(model);
+    };
+    persistWorkspace(model, (items) => items, preference.value, true).then(finish, finish);
   };
-  $("replyWorkspace").onchange = $("ntWorkspace").onchange = (e) => { e.target.dataset.changed = "1"; };
   $("ntWorkspaceRef").onclick = () => openWorkspaceModal($("ntChat").value, "cite");
 
   // ---------- wiring ----------

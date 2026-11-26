@@ -169,9 +169,11 @@ func (s *Service) workspaceLocalPlaces() []workspacePlace {
 		if err != nil {
 			continue
 		}
-		if st, err := os.Stat(container); err != nil || !st.IsDir() {
+		real, err := realDirectory(container)
+		if err != nil {
 			continue
 		}
+		place.Path = s.workspaceDisplayPath(real)
 		out = append(out, place)
 	}
 	return out
@@ -199,12 +201,16 @@ func (s *Service) workspaceBrowseDir(input string) (map[string]any, error) {
 		if workspaceHiddenDir(e.Name()) {
 			continue
 		}
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
-			path := filepath.Join(real, e.Name())
-			if st, err := os.Stat(path); err == nil && st.IsDir() {
-				items = append(items, directory{Name: e.Name(), Path: s.workspaceDisplayPath(path)})
+		path := filepath.Join(real, e.Name())
+		if e.Type()&os.ModeSymlink != 0 {
+			path, err = realDirectory(path)
+			if err != nil {
+				continue
 			}
+		} else if !e.IsDir() {
+			continue
 		}
+		items = append(items, directory{Name: e.Name(), Path: s.workspaceDisplayPath(path)})
 	}
 	sort.Slice(items, func(i, j int) bool { return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name) })
 	parent := ""

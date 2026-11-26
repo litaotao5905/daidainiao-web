@@ -451,18 +451,8 @@ a.cbtn:hover { border-color: var(--accent); text-decoration: none; }
 .ws-check:has(input:disabled) { opacity: .65; }
 .ws-compose-options { justify-content: space-between; }
 .ws-modal { width: min(660px, 94vw); min-height: 0; max-height: 94vh; max-height: 94dvh; }
-.ws-modal > .modal-head, .ws-modal > .modal-foot { flex: none; }
-#workspaceSettings { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; scrollbar-width: thin; }
-.ws-current, .ws-bind-panel { display: flex; flex-direction: column; gap: 7px; }
-.ws-current h3, .ws-bind-panel h3 { font-size: 13px; line-height: 1.4; margin: 0; }
-#workspaceBindings { max-height: 112px; scrollbar-width: thin; }
-#workspaceBindings > p { margin: 0; }
-.ws-quick-link { display: flex; gap: 6px; flex-wrap: wrap; }
-.ws-quick-link, .ws-search { margin-bottom: 4px; }
-.ws-quick-link input, .ws-path-form input {
-  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font: inherit;
-}
-.ws-quick-link input { flex: 1 1 220px; min-width: 0; }
+.ws-modal > .modal-head { flex: none; }
+#workspaceSettings { display: flex; flex-direction: column; gap: 7px; min-height: 0; overflow: auto; scrollbar-width: thin; }
 .ws-tabs { display: flex; gap: clamp(6px, 2vw, 20px); border-bottom: 1px solid var(--border); }
 .ws-tab {
   border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 7px 3px;
@@ -484,18 +474,12 @@ a.cbtn:hover { border-color: var(--accent); text-decoration: none; }
 }
 .ws-clear { padding: 0 4px; color: var(--muted); }
 .ws-action { display: inline-block; padding: 3px 7px; color: var(--accent); font-size: 12px; white-space: nowrap; text-decoration: none; }
-.ws-action:not([aria-disabled="true"]):hover { background: var(--accent-bg); text-decoration: none; }
-.ws-action.ws-selected { color: var(--muted); cursor: default; }
+.ws-action:hover { background: var(--accent-bg); text-decoration: none; }
+.ws-action.ws-selected { color: var(--muted); }
 .ws-local-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; }
 .ws-pick-hint { margin: 0; }
-.ws-places { display: flex; flex-wrap: wrap; gap: 4px; }
-.ws-place {
-  border: 0; border-radius: 999px; padding: 3px 8px; background: var(--panel2);
-  color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
-}
-.ws-place:hover { background: var(--hover); }
 .ws-browser-list {
-  height: min(400px, max(210px, calc(94dvh - 326px))); overflow: auto; scrollbar-width: thin; padding: 2px 1px;
+  height: min(400px, max(210px, calc(94dvh - 190px))); overflow: auto; scrollbar-width: thin; padding: 2px 1px;
 }
 .ws-browser-row { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 3px 5px 3px 2px; border-radius: 5px; }
 .ws-browser-row:hover, .ws-browser-row:focus-within { background: var(--hover); }
@@ -510,17 +494,7 @@ button.ws-browser-name { cursor: pointer; }
 .ws-selector-status { margin: 6px 7px; }
 .ws-selector-children { margin-inline-start: 9px; padding-inline-start: 8px; border-inline-start: 1px solid var(--border); }
 .ws-selector-more { margin-inline-start: 6px; }
-.ws-guide { margin: 0; }
-.ws-path-fallback { flex: 1 1 100%; font-size: 12px; color: var(--muted); }
-.ws-path-fallback summary { cursor: pointer; width: fit-content; }
-.ws-path-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.ws-path-form input { flex: 1 1 180px; min-width: 0; }
 .ws-list { overflow: auto; min-height: 0; max-height: 44vh; }
-.ws-binding { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 4px 2px; }
-.ws-binding-path { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ws-binding input {
-  font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
-}
 .ws-tree { display: grid; gap: 3px; padding: 8px; }
 .ws-tree-row { display: flex; align-items: center; gap: 4px; min-height: 33px; padding: 3px; border: 1px solid transparent; border-radius: 6px; }
 .ws-tree-row:hover, .ws-tree-row:focus-within { background: var(--panel2); }
